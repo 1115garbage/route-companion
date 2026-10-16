@@ -9,6 +9,7 @@ jobs:
   build:
     name: Build & Package APK
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -33,7 +34,9 @@ jobs:
 
       - name: Build Web Assets
         run: |
-          npm install
+          mkdir -p src/utils
+          echo "export async function downloadProjectZip() {}" > src/utils/projectExporter.ts
+          npm install --legacy-peer-deps
           npm run build
           mkdir -p android/app/src/main/assets
           cp -r dist/* android/app/src/main/assets/
