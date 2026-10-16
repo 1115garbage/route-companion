@@ -37,10 +37,11 @@ jobs:
           mkdir -p src/utils
           echo "export async function downloadProjectZip() {}" > src/utils/projectExporter.ts
           npm install --legacy-peer-deps
-          npm run build
+          # Build with relative base path so script/css references are relative
+          npx vite build --base=./
           mkdir -p android/app/src/main/assets/dist
-          cp -r dist/* android/app/src/main/assets/
           cp -r dist/* android/app/src/main/assets/dist/
+          cp -r dist/* android/app/src/main/assets/
 
       - name: Clean & Prepare Android Native Project
         run: |
@@ -131,6 +132,114 @@ jobs:
               implementation("androidx.appcompat:appcompat:1.6.1")
               implementation("com.google.android.material:material:1.11.0")
               implementation("androidx.webkit:webkit:1.10.0")
+          }
+          """)
+
+          with open("android/app/src/main/java/com/routecompanion/app/MainActivity.kt", "w") as f:
+              f.write("""package com.routecompanion.app
+
+          import android.Manifest
+          import android.content.pm.PackageManager
+          import android.os.Bundle
+          import android.view.WindowManager
+          import android.webkit.GeolocationPermissions
+          import android.webkit.WebChromeClient
+          import android.webkit.WebResourceRequest
+          import android.webkit.WebResourceResponse
+          import android.webkit.WebSettings
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.app.ActivityCompat
+          import androidx.core.content.ContextCompat
+          import androidx.webkit.WebViewAssetLoader
+
+          class MainActivity : AppCompatActivity() {
+              private lateinit var webView: WebView
+              private lateinit var osmandBridge: OsmAndNavigationBridge
+
+              companion object {
+                  private const val LOCATION_PERMISSION_REQUEST = 1001
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+                  // WebViewAssetLoader serves assets from secure https domain to support Vite ES module scripts
+                  val assetLoader = WebViewAssetLoader.Builder()
+                      .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
+                      .build()
+
+                  WebView.setWebContentsDebuggingEnabled(true)
+
+                  webView = WebView(this).apply {
+                      settings.apply {
+                          javaScriptEnabled = true
+                          domStorageEnabled = true
+                          databaseEnabled = true
+                          setGeolocationEnabled(true)
+                          allowFileAccess = true
+                          allowContentAccess = true
+                          allowFileAccessFromFileURLs = true
+                          allowUniversalAccessFromFileURLs = true
+                          cacheMode = WebSettings.LOAD_DEFAULT
+                          mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                      }
+
+                      webChromeClient = object : WebChromeClient() {
+                          override fun onGeolocationPermissionsShowPrompt(
+                              origin: String?,
+                              callback: GeolocationPermissions.Callback?
+                          ) {
+                              callback?.invoke(origin, true, false)
+                          }
+                      }
+
+                      webViewClient = object : WebViewClient() {
+                          override fun shouldInterceptRequest(
+                              view: WebView,
+                              request: WebResourceRequest
+                          ): WebResourceResponse? {
+                              return assetLoader.shouldInterceptRequest(request.url)
+                          }
+                      }
+                  }
+
+                  setContentView(webView)
+                  checkLocationPermission()
+
+                  osmandBridge = OsmAndNavigationBridge(this) { maneuver, street, distanceMeters ->
+                      runOnUiThread {
+                          val safeManeuver = maneuver.replace("'", "\\\'")
+                          val safeStreet = street.replace("'", "\\\'")
+                          val js = "window.onOsmAndNavUpdate && window.onOsmAndNavUpdate(\'$safeManeuver\', \'$safeStreet\', $distanceMeters);"
+                          webView.evaluateJavascript(js, null)
+                      }
+                  }
+                  osmandBridge.start()
+
+                  // Load via secure domain so ES modules execute without CORS failure
+                  webView.loadUrl("https://appassets.androidplatform.net/assets/dist/index.html")
+              }
+
+              private fun checkLocationPermission() {
+                  val permissions = arrayOf(
+                      Manifest.permission.ACCESS_FINE_LOCATION,
+                      Manifest.permission.ACCESS_COARSE_LOCATION
+                  )
+                  val needed = permissions.filter {
+                      ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+                  }
+                  if (needed.isNotEmpty()) {
+                      ActivityCompat.requestPermissions(this, needed.toTypedArray(), LOCATION_PERMISSION_REQUEST)
+                  }
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  osmandBridge.stop()
+              }
           }
           """)
 
