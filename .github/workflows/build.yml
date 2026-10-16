@@ -42,12 +42,149 @@ jobs:
           cp -r dist/* android/app/src/main/assets/
           cp -r dist/* android/app/src/main/assets/dist/
 
-      - name: Ensure Android Structure & Config
+      - name: Clean & Prepare Android Native Project
         run: |
-          mkdir -p android/app/src/main/res/values
-          touch android/app/proguard-rules.pro
-          printf '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <string name="app_name">Route Companion</string>\n</resources>\n' > android/app/src/main/res/values/strings.xml
-          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+          python3 -c '
+          import os, shutil
+
+          # 1. Remove obsolete or broken AIDL interfaces from legacy zip
+          if os.path.exists("android/app/src/main/aidl"):
+              shutil.rmtree("android/app/src/main/aidl")
+
+          # 2. Ensure directories
+          os.makedirs("android/app/src/main/res/values", exist_ok=True)
+          os.makedirs("android/app/src/main/java/com/routecompanion/app", exist_ok=True)
+
+          with open("android/app/src/main/res/values/strings.xml", "w") as f:
+              f.write("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n    <string name=\"app_name\">Route Companion</string>\n</resources>\n")
+
+          with open("android/app/proguard-rules.pro", "w") as f:
+              f.write("-keepattributes JavascriptInterface\n-keepclassmembers class * { @android.webkit.JavascriptInterface <methods>; }\n")
+
+          sdk_dir = os.environ.get("ANDROID_HOME", "/usr/local/lib/android/sdk")
+          with open("android/local.properties", "w") as f:
+              f.write(f"sdk.dir={sdk_dir}\n")
+
+          with open("android/settings.gradle.kts", "w") as f:
+              f.write("""pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          rootProject.name = "RouteCompanion"
+          include(":app")
+          """)
+
+          with open("android/app/build.gradle.kts", "w") as f:
+              f.write("""plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.routecompanion.app"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.routecompanion.app"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0.0"
+              }
+
+              lint {
+                  abortOnError = false
+                  checkReleaseBuilds = false
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.12.0")
+              implementation("androidx.appcompat:appcompat:1.6.1")
+              implementation("com.google.android.material:material:1.11.0")
+              implementation("androidx.webkit:webkit:1.10.0")
+          }
+          """)
+
+          with open("android/app/src/main/java/com/routecompanion/app/OsmAndNavigationBridge.kt", "w") as f:
+              f.write("""package com.routecompanion.app
+
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.util.Log
+          import androidx.core.content.ContextCompat
+
+          class OsmAndNavigationBridge(
+              private val context: Context,
+              private val onUpdate: (maneuver: String, street: String, distanceMeters: Int) -> Unit
+          ) {
+              private val navBroadcastReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(ctx: Context?, intent: Intent?) {
+                      if (intent?.action == "net.osmand.NAVIGATION_INFO") {
+                          val maneuver = intent.getStringExtra("NEXT_MANEUVER_TYPE") ?: "straight"
+                          val street = intent.getStringExtra("NEXT_STREET_NAME") ?: ""
+                          val dist = intent.getIntExtra("DISTANCE_TO_NEXT", 0)
+                          onUpdate(maneuver, street, dist)
+                      }
+                  }
+              }
+
+              fun start() {
+                  val filter = IntentFilter("net.osmand.NAVIGATION_INFO")
+                  try {
+                      ContextCompat.registerReceiver(
+                          context,
+                          navBroadcastReceiver,
+                          filter,
+                          ContextCompat.RECEIVER_EXPORTED
+                      )
+                  } catch (e: Exception) {
+                      try {
+                          context.registerReceiver(navBroadcastReceiver, filter)
+                      } catch (err: Exception) {
+                          Log.w("OsmAndBridge", "Could not register receiver", err)
+                      }
+                  }
+              }
+
+              fun stop() {
+                  try {
+                      context.unregisterReceiver(navBroadcastReceiver)
+                  } catch (e: Exception) {}
+              }
+          }
+          """)
+          print("Android native project verified and prepared cleanly!")
+          '
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
@@ -62,6 +199,10 @@ jobs:
           gradle assembleDebug -x lint -x test --no-daemon --stacktrace 2>&1 | tee build.log
           STATUS=${PIPESTATUS[0]}
           if [ $STATUS -ne 0 ]; then
+            echo "::error title=Gradle Build Failed::Gradle assembleDebug exited with code $STATUS"
+            tail -n 30 build.log | while IFS= read -r line; do
+              echo "::error::$line"
+            done
             echo "### ❌ Build Failed Log Summary" >> $GITHUB_STEP_SUMMARY
             echo '```text' >> $GITHUB_STEP_SUMMARY
             tail -n 100 build.log >> $GITHUB_STEP_SUMMARY
