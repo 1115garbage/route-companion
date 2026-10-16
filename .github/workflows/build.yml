@@ -37,269 +37,173 @@ jobs:
           mkdir -p src/utils
           echo "export async function downloadProjectZip() {}" > src/utils/projectExporter.ts
           npm install --legacy-peer-deps
-          # Build with relative base path so script/css references are relative
           npx vite build --base=./
           mkdir -p android/app/src/main/assets/dist
           cp -r dist/* android/app/src/main/assets/dist/
           cp -r dist/* android/app/src/main/assets/
 
       - name: Clean & Prepare Android Native Project
-        shell: python
         run: |
-          import os, shutil
-
-          # 1. Remove obsolete or broken AIDL interfaces from legacy zip
-          if os.path.exists("android/app/src/main/aidl"):
-              shutil.rmtree("android/app/src/main/aidl")
-
-          # 2. Ensure directories exist
-          os.makedirs("android/app/src/main/res/values", exist_ok=True)
-          os.makedirs("android/app/src/main/java/com/routecompanion/app", exist_ok=True)
-
-          with open("android/app/src/main/res/values/strings.xml", "w") as f:
-              f.write("""<?xml version="1.0" encoding="utf-8"?>
-          <resources>
-              <string name="app_name">Route Companion</string>
-          </resources>
-          """)
-
-          with open("android/app/proguard-rules.pro", "w") as f:
-              f.write("""-keepattributes JavascriptInterface
-          -keepclassmembers class * {
-              @android.webkit.JavascriptInterface <methods>;
-          }
-          """)
-
-          # 3. Create gradle.properties with AndroidX enabled
-          with open("android/gradle.properties", "w") as f:
-              f.write("""android.useAndroidX=true
-          android.nonTransitiveRClass=true
-          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
-          """)
-
-          sdk_dir = os.environ.get("ANDROID_HOME", "/usr/local/lib/android/sdk")
-          with open("android/local.properties", "w") as f:
-              f.write(f"sdk.dir={sdk_dir}\n")
-
-          with open("android/settings.gradle.kts", "w") as f:
-              f.write("""pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          rootProject.name = "RouteCompanion"
-          include(":app")
-          """)
-
-          with open("android/app/build.gradle.kts", "w") as f:
-              f.write("""plugins {
-              id("com.android.application")
-              id("org.jetbrains.kotlin.android")
-          }
-
-          android {
-              namespace = "com.routecompanion.app"
-              compileSdk = 34
-
-              defaultConfig {
-                  applicationId = "com.routecompanion.app"
-                  minSdk = 24
-                  targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0.0"
-              }
-
-              buildTypes {
-                  release {
-                      isMinifyEnabled = false
-                      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-                  }
-              }
-
-              compileOptions {
-                  sourceCompatibility = JavaVersion.VERSION_17
-                  targetCompatibility = JavaVersion.VERSION_17
-              }
-
-              kotlinOptions {
-                  jvmTarget = "17"
-              }
-          }
-
-          dependencies {
-              implementation("androidx.core:core-ktx:1.12.0")
-              implementation("androidx.appcompat:appcompat:1.6.1")
-              implementation("com.google.android.material:material:1.11.0")
-              implementation("androidx.webkit:webkit:1.10.0")
-          }
-          """)
-
-          with open("android/app/src/main/java/com/routecompanion/app/MainActivity.kt", "w") as f:
-              f.write("""package com.routecompanion.app
-
-          import android.Manifest
-          import android.content.pm.PackageManager
-          import android.os.Bundle
-          import android.view.WindowManager
-          import android.webkit.GeolocationPermissions
-          import android.webkit.WebChromeClient
-          import android.webkit.WebResourceRequest
-          import android.webkit.WebResourceResponse
-          import android.webkit.WebSettings
-          import android.webkit.WebView
-          import android.webkit.WebViewClient
-          import androidx.appcompat.app.AppCompatActivity
-          import androidx.core.app.ActivityCompat
-          import androidx.core.content.ContextCompat
-          import androidx.webkit.WebViewAssetLoader
-
-          class MainActivity : AppCompatActivity() {
-              private lateinit var webView: WebView
-              private lateinit var osmandBridge: OsmAndNavigationBridge
-
-              companion object {
-                  private const val LOCATION_PERMISSION_REQUEST = 1001
-              }
-
-              override fun onCreate(savedInstanceState: Bundle?) {
-                  super.onCreate(savedInstanceState)
-                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-                  val assetLoader = WebViewAssetLoader.Builder()
-                      .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
-                      .build()
-
-                  WebView.setWebContentsDebuggingEnabled(true)
-
-                  webView = WebView(this).apply {
-                      settings.apply {
-                          javaScriptEnabled = true
-                          domStorageEnabled = true
-                          databaseEnabled = true
-                          setGeolocationEnabled(true)
-                          allowFileAccess = true
-                          allowContentAccess = true
-                          allowFileAccessFromFileURLs = true
-                          allowUniversalAccessFromFileURLs = true
-                          cacheMode = WebSettings.LOAD_DEFAULT
-                          mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                      }
-
-                      webChromeClient = object : WebChromeClient() {
-                          override fun onGeolocationPermissionsShowPrompt(
-                              origin: String?,
-                              callback: GeolocationPermissions.Callback?
-                          ) {
-                              callback?.invoke(origin, true, false)
-                          }
-                      }
-
-                      webViewClient = object : WebViewClient() {
-                          override fun shouldInterceptRequest(
-                              view: WebView,
-                              request: WebResourceRequest
-                          ): WebResourceResponse? {
-                              return assetLoader.shouldInterceptRequest(request.url)
-                          }
-                      }
-                  }
-
-                  setContentView(webView)
-                  checkLocationPermission()
-
-                  osmandBridge = OsmAndNavigationBridge(this) { maneuver, street, distanceMeters ->
-                      runOnUiThread {
-                          val safeManeuver = maneuver.replace("\"", "")
-                          val safeStreet = street.replace("\"", "")
-                          val js = "window.onOsmAndNavUpdate && window.onOsmAndNavUpdate(\"" + safeManeuver + "\", \"" + safeStreet + "\", " + str(distanceMeters) + ");"
-                          webView.evaluateJavascript(js, null)
-                      }
-                  }
-                  osmandBridge.start()
-
-                  webView.loadUrl("https://appassets.androidplatform.net/assets/dist/index.html")
-              }
-
-              private fun checkLocationPermission() {
-                  val permissions = arrayOf(
-                      Manifest.permission.ACCESS_FINE_LOCATION,
-                      Manifest.permission.ACCESS_COARSE_LOCATION
-                  )
-                  val needed = permissions.filter {
-                      ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-                  }
-                  if (needed.isNotEmpty()) {
-                      ActivityCompat.requestPermissions(this, needed.toTypedArray(), LOCATION_PERMISSION_REQUEST)
-                  }
-              }
-
-              override fun onDestroy() {
-                  super.onDestroy()
-                  osmandBridge.stop()
-              }
-          }
-          """)
-
-          with open("android/app/src/main/java/com/routecompanion/app/OsmAndNavigationBridge.kt", "w") as f:
-              f.write("""package com.routecompanion.app
-
-          import android.content.BroadcastReceiver
-          import android.content.Context
-          import android.content.Intent
-          import android.content.IntentFilter
-          import android.util.Log
-          import androidx.core.content.ContextCompat
-
-          class OsmAndNavigationBridge(
-              private val context: Context,
-              private val onUpdate: (maneuver: String, street: String, distanceMeters: Int) -> Unit
-          ) {
-              private val navBroadcastReceiver = object : BroadcastReceiver() {
-                  override fun onReceive(ctx: Context?, intent: Intent?) {
-                      if (intent?.action == "net.osmand.NAVIGATION_INFO") {
-                          val maneuver = intent.getStringExtra("NEXT_MANEUVER_TYPE") ?: "straight"
-                          val street = intent.getStringExtra("NEXT_STREET_NAME") ?: ""
-                          val dist = intent.getIntExtra("DISTANCE_TO_NEXT", 0)
-                          onUpdate(maneuver, street, dist)
-                      }
-                  }
-              }
-
-              fun start() {
-                  val filter = IntentFilter("net.osmand.NAVIGATION_INFO")
-                  try {
-                      ContextCompat.registerReceiver(
-                          context,
-                          navBroadcastReceiver,
-                          filter,
-                          ContextCompat.RECEIVER_EXPORTED
-                      )
-                  } catch (e: Exception) {
-                      try {
-                          context.registerReceiver(navBroadcastReceiver, filter)
-                      } catch (err: Exception) {
-                          Log.w("OsmAndBridge", "Could not register receiver", err)
-                      }
-                  }
-              }
-
-              fun stop() {
-                  try {
-                      context.unregisterReceiver(navBroadcastReceiver)
-                  } catch (e: Exception) {}
-              }
-          }
-          """)
-          print("Android native project verified and prepared cleanly!")
+          mkdir -p scripts
+          cat << 'EOF' | base64 -d > scripts/prepare_android.py
+          aW1wb3J0IG9zCmltcG9ydCBzaHV0aWwKCmRlZiBtYWluKCk6CiAgICBwcmludCgiUHJlcGFyaW5n
+          IEFuZHJvaWQgTmF0aXZlIFByb2plY3QuLi4iKQoKICAgICMgMS4gUmVtb3ZlIG9ic29sZXRlIG9y
+          IGJyb2tlbiBBSURMIGludGVyZmFjZXMgZnJvbSBsZWdhY3kgemlwCiAgICBpZiBvcy5wYXRoLmV4
+          aXN0cygiYW5kcm9pZC9hcHAvc3JjL21haW4vYWlkbCIpOgogICAgICAgIHNodXRpbC5ybXRyZWUo
+          ImFuZHJvaWQvYXBwL3NyYy9tYWluL2FpZGwiKQogICAgICAgIHByaW50KCJSZW1vdmVkIGxlZ2Fj
+          eSBBSURMIGZvbGRlci4iKQoKICAgICMgMi4gRW5zdXJlIGRpcmVjdG9yaWVzIGV4aXN0CiAgICBv
+          cy5tYWtlZGlycygiYW5kcm9pZC9hcHAvc3JjL21haW4vcmVzL3ZhbHVlcyIsIGV4aXN0X29rPVRy
+          dWUpCiAgICBvcy5tYWtlZGlycygiYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9jb20vcm91dGVj
+          b21wYW5pb24vYXBwIiwgZXhpc3Rfb2s9VHJ1ZSkKCiAgICAjIDMuIHN0cmluZ3MueG1sCiAgICB3
+          aXRoIG9wZW4oImFuZHJvaWQvYXBwL3NyYy9tYWluL3Jlcy92YWx1ZXMvc3RyaW5ncy54bWwiLCAi
+          dyIsIGVuY29kaW5nPSJ1dGYtOCIpIGFzIGY6CiAgICAgICAgZi53cml0ZSgiIiI8P3htbCB2ZXJz
+          aW9uPSIxLjAiIGVuY29kaW5nPSJ1dGYtOCI/Pgo8cmVzb3VyY2VzPgogICAgPHN0cmluZyBuYW1l
+          PSJhcHBfbmFtZSI+Um91dGUgQ29tcGFuaW9uPC9zdHJpbmc+CjwvcmVzb3VyY2VzPgoiIiIpCgog
+          ICAgIyA0LiBwcm9ndWFyZC1ydWxlcy5wcm8KICAgIHdpdGggb3BlbigiYW5kcm9pZC9hcHAvcHJv
+          Z3VhcmQtcnVsZXMucHJvIiwgInciLCBlbmNvZGluZz0idXRmLTgiKSBhcyBmOgogICAgICAgIGYu
+          d3JpdGUoIiIiLWtlZXBhdHRyaWJ1dGVzIEphdmFzY3JpcHRJbnRlcmZhY2UKLWtlZXBjbGFzc21l
+          bWJlcnMgY2xhc3MgKiB7CiAgICBAYW5kcm9pZC53ZWJraXQuSmF2YXNjcmlwdEludGVyZmFjZSA8
+          bWV0aG9kcz47Cn0KIiIiKQoKICAgICMgNS4gZ3JhZGxlLnByb3BlcnRpZXMKICAgIHdpdGggb3Bl
+          bigiYW5kcm9pZC9ncmFkbGUucHJvcGVydGllcyIsICJ3IiwgZW5jb2Rpbmc9InV0Zi04IikgYXMg
+          ZjoKICAgICAgICBmLndyaXRlKCIiImFuZHJvaWQudXNlQW5kcm9pZFg9dHJ1ZQphbmRyb2lkLm5v
+          blRyYW5zaXRpdmVSQ2xhc3M9dHJ1ZQpvcmcuZ3JhZGxlLmp2bWFyZ3M9LVhteDIwNDhtIC1EZmls
+          ZS5lbmNvZGluZz1VVEYtOAoiIiIpCgogICAgIyA2LiBsb2NhbC5wcm9wZXJ0aWVzCiAgICBzZGtf
+          ZGlyID0gb3MuZW52aXJvbi5nZXQoIkFORFJPSURfSE9NRSIsICIvdXNyL2xvY2FsL2xpYi9hbmRy
+          b2lkL3NkayIpCiAgICB3aXRoIG9wZW4oImFuZHJvaWQvbG9jYWwucHJvcGVydGllcyIsICJ3Iiwg
+          ZW5jb2Rpbmc9InV0Zi04IikgYXMgZjoKICAgICAgICBmLndyaXRlKGYic2RrLmRpcj17c2RrX2Rp
+          cn1cbiIpCgogICAgIyA3LiBzZXR0aW5ncy5ncmFkbGUua3RzCiAgICB3aXRoIG9wZW4oImFuZHJv
+          aWQvc2V0dGluZ3MuZ3JhZGxlLmt0cyIsICJ3IiwgZW5jb2Rpbmc9InV0Zi04IikgYXMgZjoKICAg
+          ICAgICBmLndyaXRlKCIiInBsdWdpbk1hbmFnZW1lbnQgewogICAgcmVwb3NpdG9yaWVzIHsKICAg
+          ICAgICBnb29nbGUoKQogICAgICAgIG1hdmVuQ2VudHJhbCgpCiAgICAgICAgZ3JhZGxlUGx1Z2lu
+          UG9ydGFsKCkKICAgIH0KfQpkZXBlbmRlbmN5UmVzb2x1dGlvbk1hbmFnZW1lbnQgewogICAgcmVw
+          b3NpdG9yaWVzTW9kZS5zZXQoUmVwb3NpdG9yaWVzTW9kZS5GQUlMX09OX1BST0pFQ1RfUkVQT1Mp
+          CiAgICByZXBvc2l0b3JpZXMgewogICAgICAgIGdvb2dsZSgpCiAgICAgICAgbWF2ZW5DZW50cmFs
+          KCkKICAgIH0KfQpyb290UHJvamVjdC5uYW1lID0gIlJvdXRlQ29tcGFuaW9uIgppbmNsdWRlKCI6
+          YXBwIikKIiIiKQoKICAgICMgOC4gYnVpbGQuZ3JhZGxlLmt0cyAoYXBwKQogICAgd2l0aCBvcGVu
+          KCJhbmRyb2lkL2FwcC9idWlsZC5ncmFkbGUua3RzIiwgInciLCBlbmNvZGluZz0idXRmLTgiKSBh
+          cyBmOgogICAgICAgIGYud3JpdGUoIiIicGx1Z2lucyB7CiAgICBpZCgiY29tLmFuZHJvaWQuYXBw
+          bGljYXRpb24iKQogICAgaWQoIm9yZy5qZXRicmFpbnMua290bGluLmFuZHJvaWQiKQp9CgphbmRy
+          b2lkIHsKICAgIG5hbWVzcGFjZSA9ICJjb20ucm91dGVjb21wYW5pb24uYXBwIgogICAgY29tcGls
+          ZVNkayA9IDM0CgogICAgZGVmYXVsdENvbmZpZyB7CiAgICAgICAgYXBwbGljYXRpb25JZCA9ICJj
+          b20ucm91dGVjb21wYW5pb24uYXBwIgogICAgICAgIG1pblNkayA9IDI0CiAgICAgICAgdGFyZ2V0
+          U2RrID0gMzQKICAgICAgICB2ZXJzaW9uQ29kZSA9IDEKICAgICAgICB2ZXJzaW9uTmFtZSA9ICIx
+          LjAuMCIKICAgIH0KCiAgICBidWlsZFR5cGVzIHsKICAgICAgICByZWxlYXNlIHsKICAgICAgICAg
+          ICAgaXNNaW5pZnlFbmFibGVkID0gZmFsc2UKICAgICAgICAgICAgcHJvZ3VhcmRGaWxlcyhnZXRE
+          ZWZhdWx0UHJvZ3VhcmRGaWxlKCJwcm9ndWFyZC1hbmRyb2lkLW9wdGltaXplLnR4dCIpLCAicHJv
+          Z3VhcmQtcnVsZXMucHJvIikKICAgICAgICB9CiAgICB9CgogICAgY29tcGlsZU9wdGlvbnMgewog
+          ICAgICAgIHNvdXJjZUNvbXBhdGliaWxpdHkgPSBKYXZhVmVyc2lvbi5WRVJTSU9OXzE3CiAgICAg
+          ICAgdGFyZ2V0Q29tcGF0aWJpbGl0eSA9IEphdmFWZXJzaW9uLlZFUlNJT05fMTcKICAgIH0KCiAg
+          ICBrb3RsaW5PcHRpb25zIHsKICAgICAgICBqdm1UYXJnZXQgPSAiMTciCiAgICB9Cn0KCmRlcGVu
+          ZGVuY2llcyB7CiAgICBpbXBsZW1lbnRhdGlvbigiYW5kcm9pZHguY29yZTpjb3JlLWt0eDoxLjEy
+          LjAiKQogICAgaW1wbGVtZW50YXRpb24oImFuZHJvaWR4LmFwcGNvbXBhdDphcHBjb21wYXQ6MS42
+          LjEiKQogICAgaW1wbGVtZW50YXRpb24oImNvbS5nb29nbGUuYW5kcm9pZC5tYXRlcmlhbDptYXRl
+          cmlhbDoxLjExLjAiKQogICAgaW1wbGVtZW50YXRpb24oImFuZHJvaWR4LndlYmtpdDp3ZWJraXQ6
+          MS4xMC4wIikKfQoiIiIpCgogICAgIyA5LiBNYWluQWN0aXZpdHkua3Qgd2l0aCBXZWJWaWV3QXNz
+          ZXRMb2FkZXIgZm9yIEVTIG1vZHVsZSBhbmQgQ09SUyBzdXBwb3J0CiAgICB3aXRoIG9wZW4oImFu
+          ZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvY29tL3JvdXRlY29tcGFuaW9uL2FwcC9NYWluQWN0aXZp
+          dHkua3QiLCAidyIsIGVuY29kaW5nPSJ1dGYtOCIpIGFzIGY6CiAgICAgICAgZi53cml0ZSgiIiJw
+          YWNrYWdlIGNvbS5yb3V0ZWNvbXBhbmlvbi5hcHAKCmltcG9ydCBhbmRyb2lkLk1hbmlmZXN0Cmlt
+          cG9ydCBhbmRyb2lkLmNvbnRlbnQucG0uUGFja2FnZU1hbmFnZXIKaW1wb3J0IGFuZHJvaWQub3Mu
+          QnVuZGxlCmltcG9ydCBhbmRyb2lkLnZpZXcuV2luZG93TWFuYWdlcgppbXBvcnQgYW5kcm9pZC53
+          ZWJraXQuR2VvbG9jYXRpb25QZXJtaXNzaW9ucwppbXBvcnQgYW5kcm9pZC53ZWJraXQuV2ViQ2hy
+          b21lQ2xpZW50CmltcG9ydCBhbmRyb2lkLndlYmtpdC5XZWJSZXNvdXJjZVJlcXVlc3QKaW1wb3J0
+          IGFuZHJvaWQud2Via2l0LldlYlJlc291cmNlUmVzcG9uc2UKaW1wb3J0IGFuZHJvaWQud2Via2l0
+          LldlYlNldHRpbmdzCmltcG9ydCBhbmRyb2lkLndlYmtpdC5XZWJWaWV3CmltcG9ydCBhbmRyb2lk
+          LndlYmtpdC5XZWJWaWV3Q2xpZW50CmltcG9ydCBhbmRyb2lkeC5hcHBjb21wYXQuYXBwLkFwcENv
+          bXBhdEFjdGl2aXR5CmltcG9ydCBhbmRyb2lkeC5jb3JlLmFwcC5BY3Rpdml0eUNvbXBhdAppbXBv
+          cnQgYW5kcm9pZHguY29yZS5jb250ZW50LkNvbnRleHRDb21wYXQKaW1wb3J0IGFuZHJvaWR4Lndl
+          YmtpdC5XZWJWaWV3QXNzZXRMb2FkZXIKCmNsYXNzIE1haW5BY3Rpdml0eSA6IEFwcENvbXBhdEFj
+          dGl2aXR5KCkgewogICAgcHJpdmF0ZSBsYXRlaW5pdCB2YXIgd2ViVmlldzogV2ViVmlldwogICAg
+          cHJpdmF0ZSBsYXRlaW5pdCB2YXIgb3NtYW5kQnJpZGdlOiBPc21BbmROYXZpZ2F0aW9uQnJpZGdl
+          CgogICAgY29tcGFuaW9uIG9iamVjdCB7CiAgICAgICAgcHJpdmF0ZSBjb25zdCB2YWwgTE9DQVRJ
+          T05fUEVSTUlTU0lPTl9SRVFVRVNUID0gMTAwMQogICAgfQoKICAgIG92ZXJyaWRlIGZ1biBvbkNy
+          ZWF0ZShzYXZlZEluc3RhbmNlU3RhdGU6IEJ1bmRsZT8pIHsKICAgICAgICBzdXBlci5vbkNyZWF0
+          ZShzYXZlZEluc3RhbmNlU3RhdGUpCiAgICAgICAgd2luZG93LmFkZEZsYWdzKFdpbmRvd01hbmFn
+          ZXIuTGF5b3V0UGFyYW1zLkZMQUdfS0VFUF9TQ1JFRU5fT04pCgogICAgICAgIHZhbCBhc3NldExv
+          YWRlciA9IFdlYlZpZXdBc3NldExvYWRlci5CdWlsZGVyKCkKICAgICAgICAgICAgLmFkZFBhdGhI
+          YW5kbGVyKCIvYXNzZXRzLyIsIFdlYlZpZXdBc3NldExvYWRlci5Bc3NldHNQYXRoSGFuZGxlcih0
+          aGlzKSkKICAgICAgICAgICAgLmJ1aWxkKCkKCiAgICAgICAgV2ViVmlldy5zZXRXZWJDb250ZW50
+          c0RlYnVnZ2luZ0VuYWJsZWQodHJ1ZSkKCiAgICAgICAgd2ViVmlldyA9IFdlYlZpZXcodGhpcyku
+          YXBwbHkgewogICAgICAgICAgICBzZXR0aW5ncy5hcHBseSB7CiAgICAgICAgICAgICAgICBqYXZh
+          U2NyaXB0RW5hYmxlZCA9IHRydWUKICAgICAgICAgICAgICAgIGRvbVN0b3JhZ2VFbmFibGVkID0g
+          dHJ1ZQogICAgICAgICAgICAgICAgZGF0YWJhc2VFbmFibGVkID0gdHJ1ZQogICAgICAgICAgICAg
+          ICAgc2V0R2VvbG9jYXRpb25FbmFibGVkKHRydWUpCiAgICAgICAgICAgICAgICBhbGxvd0ZpbGVB
+          Y2Nlc3MgPSB0cnVlCiAgICAgICAgICAgICAgICBhbGxvd0NvbnRlbnRBY2Nlc3MgPSB0cnVlCiAg
+          ICAgICAgICAgICAgICBhbGxvd0ZpbGVBY2Nlc3NGcm9tRmlsZVVSTHMgPSB0cnVlCiAgICAgICAg
+          ICAgICAgICBhbGxvd1VuaXZlcnNhbEFjY2Vzc0Zyb21GaWxlVVJMcyA9IHRydWUKICAgICAgICAg
+          ICAgICAgIGNhY2hlTW9kZSA9IFdlYlNldHRpbmdzLkxPQURfREVGQVVMVAogICAgICAgICAgICAg
+          ICAgbWl4ZWRDb250ZW50TW9kZSA9IFdlYlNldHRpbmdzLk1JWEVEX0NPTlRFTlRfQUxXQVlTX0FM
+          TE9XCiAgICAgICAgICAgIH0KCiAgICAgICAgICAgIHdlYkNocm9tZUNsaWVudCA9IG9iamVjdCA6
+          IFdlYkNocm9tZUNsaWVudCgpIHsKICAgICAgICAgICAgICAgIG92ZXJyaWRlIGZ1biBvbkdlb2xv
+          Y2F0aW9uUGVybWlzc2lvbnNTaG93UHJvbXB0KAogICAgICAgICAgICAgICAgICAgIG9yaWdpbjog
+          U3RyaW5nPywKICAgICAgICAgICAgICAgICAgICBjYWxsYmFjazogR2VvbG9jYXRpb25QZXJtaXNz
+          aW9ucy5DYWxsYmFjaz8KICAgICAgICAgICAgICAgICkgewogICAgICAgICAgICAgICAgICAgIGNh
+          bGxiYWNrPy5pbnZva2Uob3JpZ2luLCB0cnVlLCBmYWxzZSkKICAgICAgICAgICAgICAgIH0KICAg
+          ICAgICAgICAgfQoKICAgICAgICAgICAgd2ViVmlld0NsaWVudCA9IG9iamVjdCA6IFdlYlZpZXdD
+          bGllbnQoKSB7CiAgICAgICAgICAgICAgICBvdmVycmlkZSBmdW4gc2hvdWxkSW50ZXJjZXB0UmVx
+          dWVzdCgKICAgICAgICAgICAgICAgICAgICB2aWV3OiBXZWJWaWV3LAogICAgICAgICAgICAgICAg
+          ICAgIHJlcXVlc3Q6IFdlYlJlc291cmNlUmVxdWVzdAogICAgICAgICAgICAgICAgKTogV2ViUmVz
+          b3VyY2VSZXNwb25zZT8gewogICAgICAgICAgICAgICAgICAgIHZhbCByZXMgPSBhc3NldExvYWRl
+          ci5zaG91bGRJbnRlcmNlcHRSZXF1ZXN0KHJlcXVlc3QudXJsKQogICAgICAgICAgICAgICAgICAg
+          IHJldHVybiByZXMgPzogc3VwZXIuc2hvdWxkSW50ZXJjZXB0UmVxdWVzdCh2aWV3LCByZXF1ZXN0
+          KQogICAgICAgICAgICAgICAgfQogICAgICAgICAgICB9CiAgICAgICAgfQoKICAgICAgICBzZXRD
+          b250ZW50Vmlldyh3ZWJWaWV3KQogICAgICAgIGNoZWNrTG9jYXRpb25QZXJtaXNzaW9uKCkKCiAg
+          ICAgICAgb3NtYW5kQnJpZGdlID0gT3NtQW5kTmF2aWdhdGlvbkJyaWRnZSh0aGlzKSB7IG1hbmV1
+          dmVyLCBzdHJlZXQsIGRpc3RhbmNlTWV0ZXJzIC0+CiAgICAgICAgICAgIHJ1bk9uVWlUaHJlYWQg
+          ewogICAgICAgICAgICAgICAgdmFsIHNhZmVNYW5ldXZlciA9IG1hbmV1dmVyLnJlcGxhY2UoIici
+          LCAiXFxcXCciKQogICAgICAgICAgICAgICAgdmFsIHNhZmVTdHJlZXQgPSBzdHJlZXQucmVwbGFj
+          ZSgiJyIsICJcXFxcJyIpCiAgICAgICAgICAgICAgICB2YWwganMgPSAid2luZG93Lm9uT3NtQW5k
+          TmF2VXBkYXRlICYmIHdpbmRvdy5vbk9zbUFuZE5hdlVwZGF0ZSgnJHNhZmVNYW5ldXZlcicsICck
+          c2FmZVN0cmVldCcsICRkaXN0YW5jZU1ldGVycyk7IgogICAgICAgICAgICAgICAgd2ViVmlldy5l
+          dmFsdWF0ZUphdmFzY3JpcHQoanMsIG51bGwpCiAgICAgICAgICAgIH0KICAgICAgICB9CiAgICAg
+          ICAgb3NtYW5kQnJpZGdlLnN0YXJ0KCkKCiAgICAgICAgd2ViVmlldy5sb2FkVXJsKCJodHRwczov
+          L2FwcGFzc2V0cy5hbmRyb2lkcGxhdGZvcm0ubmV0L2Fzc2V0cy9kaXN0L2luZGV4Lmh0bWwiKQog
+          ICAgfQoKICAgIHByaXZhdGUgZnVuIGNoZWNrTG9jYXRpb25QZXJtaXNzaW9uKCkgewogICAgICAg
+          IHZhbCBwZXJtaXNzaW9ucyA9IGFycmF5T2YoCiAgICAgICAgICAgIE1hbmlmZXN0LnBlcm1pc3Np
+          b24uQUNDRVNTX0ZJTkVfTE9DQVRJT04sCiAgICAgICAgICAgIE1hbmlmZXN0LnBlcm1pc3Npb24u
+          QUNDRVNTX0NPQVJTRV9MT0NBVElPTgogICAgICAgICkKICAgICAgICB2YWwgbmVlZGVkID0gcGVy
+          bWlzc2lvbnMuZmlsdGVyIHsKICAgICAgICAgICAgQ29udGV4dENvbXBhdC5jaGVja1NlbGZQZXJt
+          aXNzaW9uKHRoaXMsIGl0KSAhPSBQYWNrYWdlTWFuYWdlci5QRVJNSVNTSU9OX0dSQU5URUQKICAg
+          ICAgICB9CiAgICAgICAgaWYgKG5lZWRlZC5pc05vdEVtcHR5KCkpIHsKICAgICAgICAgICAgQWN0
+          aXZpdHlDb21wYXQucmVxdWVzdFBlcm1pc3Npb25zKHRoaXMsIG5lZWRlZC50b1R5cGVkQXJyYXko
+          KSwgTE9DQVRJT05fUEVSTUlTU0lPTl9SRVFVRVNUKQogICAgICAgIH0KICAgIH0KCiAgICBvdmVy
+          cmlkZSBmdW4gb25EZXN0cm95KCkgewogICAgICAgIHN1cGVyLm9uRGVzdHJveSgpCiAgICAgICAg
+          b3NtYW5kQnJpZGdlLnN0b3AoKQogICAgfQp9CiIiIikKCiAgICAjIDEwLiBPc21BbmROYXZpZ2F0
+          aW9uQnJpZGdlLmt0CiAgICB3aXRoIG9wZW4oImFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvY29t
+          L3JvdXRlY29tcGFuaW9uL2FwcC9Pc21BbmROYXZpZ2F0aW9uQnJpZGdlLmt0IiwgInciLCBlbmNv
+          ZGluZz0idXRmLTgiKSBhcyBmOgogICAgICAgIGYud3JpdGUoIiIicGFja2FnZSBjb20ucm91dGVj
+          b21wYW5pb24uYXBwCgppbXBvcnQgYW5kcm9pZC5jb250ZW50LkJyb2FkY2FzdFJlY2VpdmVyCmlt
+          cG9ydCBhbmRyb2lkLmNvbnRlbnQuQ29udGV4dAppbXBvcnQgYW5kcm9pZC5jb250ZW50LkludGVu
+          dAppbXBvcnQgYW5kcm9pZC5jb250ZW50LkludGVudEZpbHRlcgppbXBvcnQgYW5kcm9pZC51dGls
+          LkxvZwppbXBvcnQgYW5kcm9pZHguY29yZS5jb250ZW50LkNvbnRleHRDb21wYXQKCmNsYXNzIE9z
+          bUFuZE5hdmlnYXRpb25CcmlkZ2UoCiAgICBwcml2YXRlIHZhbCBjb250ZXh0OiBDb250ZXh0LAog
+          ICAgcHJpdmF0ZSB2YWwgb25VcGRhdGU6IChtYW5ldXZlcjogU3RyaW5nLCBzdHJlZXQ6IFN0cmlu
+          ZywgZGlzdGFuY2VNZXRlcnM6IEludCkgLT4gVW5pdAopIHsKICAgIHByaXZhdGUgdmFsIG5hdkJy
+          b2FkY2FzdFJlY2VpdmVyID0gb2JqZWN0IDogQnJvYWRjYXN0UmVjZWl2ZXIoKSB7CiAgICAgICAg
+          b3ZlcnJpZGUgZnVuIG9uUmVjZWl2ZShjdHg6IENvbnRleHQ/LCBpbnRlbnQ6IEludGVudD8pIHsK
+          ICAgICAgICAgICAgaWYgKGludGVudD8uYWN0aW9uID09ICJuZXQub3NtYW5kLk5BVklHQVRJT05f
+          SU5GTyIpIHsKICAgICAgICAgICAgICAgIHZhbCBtYW5ldXZlciA9IGludGVudC5nZXRTdHJpbmdF
+          eHRyYSgiTkVYVF9NQU5FVVZFUl9UWVBFIikgPzogInN0cmFpZ2h0IgogICAgICAgICAgICAgICAg
+          dmFsIHN0cmVldCA9IGludGVudC5nZXRTdHJpbmdFeHRyYSgiTkVYVF9TVFJFRVRfTkFNRSIpID86
+          ICIiCiAgICAgICAgICAgICAgICB2YWwgZGlzdCA9IGludGVudC5nZXRJbnRFeHRyYSgiRElTVEFO
+          Q0VfVE9fTkVYVCIsIDApCiAgICAgICAgICAgICAgICBvblVwZGF0ZShtYW5ldXZlciwgc3RyZWV0
+          LCBkaXN0KQogICAgICAgICAgICB9CiAgICAgICAgfQogICAgfQoKICAgIGZ1biBzdGFydCgpIHsK
+          ICAgICAgICB2YWwgZmlsdGVyID0gSW50ZW50RmlsdGVyKCJuZXQub3NtYW5kLk5BVklHQVRJT05f
+          SU5GTyIpCiAgICAgICAgdHJ5IHsKICAgICAgICAgICAgQ29udGV4dENvbXBhdC5yZWdpc3RlclJl
+          Y2VpdmVyKAogICAgICAgICAgICAgICAgY29udGV4dCwKICAgICAgICAgICAgICAgIG5hdkJyb2Fk
+          Y2FzdFJlY2VpdmVyLAogICAgICAgICAgICAgICAgZmlsdGVyLAogICAgICAgICAgICAgICAgQ29u
+          dGV4dENvbXBhdC5SRUNFSVZFUl9FWFBPUlRFRAogICAgICAgICAgICApCiAgICAgICAgfSBjYXRj
+          aCAoZTogRXhjZXB0aW9uKSB7CiAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICBjb250
+          ZXh0LnJlZ2lzdGVyUmVjZWl2ZXIobmF2QnJvYWRjYXN0UmVjZWl2ZXIsIGZpbHRlcikKICAgICAg
+          ICAgICAgfSBjYXRjaCAoZXJyOiBFeGNlcHRpb24pIHsKICAgICAgICAgICAgICAgIExvZy53KCJP
+          c21BbmRCcmlkZ2UiLCAiQ291bGQgbm90IHJlZ2lzdGVyIHJlY2VpdmVyIiwgZXJyKQogICAgICAg
+          ICAgICB9CiAgICAgICAgfQogICAgfQoKICAgIGZ1biBzdG9wKCkgewogICAgICAgIHRyeSB7CiAg
+          ICAgICAgICAgIGNvbnRleHQudW5yZWdpc3RlclJlY2VpdmVyKG5hdkJyb2FkY2FzdFJlY2VpdmVy
+          KQogICAgICAgIH0gY2F0Y2ggKGU6IEV4Y2VwdGlvbikge30KICAgIH0KfQoiIiIpCgogICAgcHJp
+          bnQoIlNVQ0NFU1M6IEFuZHJvaWQgbmF0aXZlIHByb2plY3QgZmlsZXMgY29uZmlndXJlZCBwcm9w
+          ZXJseSEiKQoKaWYgX19uYW1lX18gPT0gIl9fbWFpbl9fIjoKICAgIG1haW4oKQo=
+          EOF
+          python3 scripts/prepare_android.py
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
