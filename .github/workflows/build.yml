@@ -42,14 +42,64 @@ jobs:
           cp -r dist/* android/app/src/main/assets/
           cp -r dist/* android/app/src/main/assets/dist/
 
-      - name: Fix Android Source & Config
+      - name: Prepare Android Project & Clean Architecture
         run: |
-          # 1. Fix AIDL primitive types
-          if [ -f android/app/src/main/aidl/net/osmand/aidl/IOsmAndAidlInterface.aidl ]; then
-            sed -i 's/in boolean/boolean/g' android/app/src/main/aidl/net/osmand/aidl/IOsmAndAidlInterface.aidl
-            sed -i 's/in double/double/g' android/app/src/main/aidl/net/osmand/aidl/IOsmAndAidlInterface.aidl
-          fi
-          # 2. Ensure Android SDK path and licenses
+          # 1. Ensure minimal Android resource directory and proguard file
+          mkdir -p android/app/src/main/res/values
+          touch android/app/proguard-rules.pro
+          cat << 'EOF' > android/app/src/main/res/values/strings.xml
+          <resources>
+              <string name="app_name">Route Companion</string>
+          </resources>
+          EOF
+
+          # 2. Replace OsmAndNavigationBridge with pure Intent BroadcastReceiver (no AIDL required)
+          cat << 'EOF' > android/app/src/main/java/com/routecompanion/app/OsmAndNavigationBridge.kt
+          package com.routecompanion.app
+
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.util.Log
+
+          class OsmAndNavigationBridge(
+              private val context: Context,
+              private val onUpdate: (maneuver: String, street: String, distanceMeters: Int) -> Unit
+          ) {
+              private val navBroadcastReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(ctx: Context?, intent: Intent?) {
+                      if (intent?.action == "net.osmand.NAVIGATION_INFO") {
+                          val maneuver = intent.getStringExtra("NEXT_MANEUVER_TYPE") ?: "straight"
+                          val street = intent.getStringExtra("NEXT_STREET_NAME") ?: ""
+                          val dist = intent.getIntExtra("DISTANCE_TO_NEXT", 0)
+                          onUpdate(maneuver, street, dist)
+                      }
+                  }
+              }
+
+              fun start() {
+                  val filter = IntentFilter("net.osmand.NAVIGATION_INFO")
+                  try {
+                      context.registerReceiver(navBroadcastReceiver, filter)
+                  } catch (e: Exception) {
+                      Log.w("OsmAndBridge", "Could not register receiver", e)
+                  }
+              }
+
+              fun stop() {
+                  try {
+                      context.unregisterReceiver(navBroadcastReceiver)
+                  } catch (e: Exception) {}
+              }
+          }
+          EOF
+
+          # 3. Remove fragile AIDL files and disable AIDL feature
+          rm -rf android/app/src/main/aidl
+          sed -i 's/aidl = true/aidl = false/g' android/app/build.gradle.kts || true
+
+          # 4. Ensure SDK config & licenses
           echo "sdk.dir=$ANDROID_HOME" > android/local.properties
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
@@ -57,10 +107,23 @@ jobs:
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: 8.5
+          cache-disabled: true
 
       - name: Build Android APK
         working-directory: ./android
-        run: gradle assembleDebug -x lint -x test --no-daemon --stacktrace
+        run: |
+          set +e
+          gradle assembleDebug -x lint -x test --no-daemon --stacktrace 2>&1 | tee build.log
+          STATUS=${PIPESTATUS[0]}
+          if [ $STATUS -ne 0 ]; then
+            echo "### ❌ Build Failed Log Summary" >> $GITHUB_STEP_SUMMARY
+            echo '```text' >> $GITHUB_STEP_SUMMARY
+            tail -n 80 build.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit $STATUS
+          else
+            echo "### ✅ Android APK Built Successfully!" >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: Upload Ready-to-Install APK
         uses: actions/upload-artifact@v4
