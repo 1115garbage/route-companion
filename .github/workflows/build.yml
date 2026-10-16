@@ -44,8 +44,8 @@ jobs:
           cp -r dist/* android/app/src/main/assets/
 
       - name: Clean & Prepare Android Native Project
+        shell: python
         run: |
-          python3 -c '
           import os, shutil
 
           # 1. Remove obsolete or broken AIDL interfaces from legacy zip
@@ -57,10 +57,18 @@ jobs:
           os.makedirs("android/app/src/main/java/com/routecompanion/app", exist_ok=True)
 
           with open("android/app/src/main/res/values/strings.xml", "w") as f:
-              f.write("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n    <string name=\"app_name\">Route Companion</string>\n</resources>\n")
+              f.write("""<?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Route Companion</string>
+          </resources>
+          """)
 
           with open("android/app/proguard-rules.pro", "w") as f:
-              f.write("-keepattributes JavascriptInterface\n-keepclassmembers class * { @android.webkit.JavascriptInterface <methods>; }\n")
+              f.write("""-keepattributes JavascriptInterface
+          -keepclassmembers class * {
+              @android.webkit.JavascriptInterface <methods>;
+          }
+          """)
 
           # 3. Create gradle.properties with AndroidX enabled
           with open("android/gradle.properties", "w") as f:
@@ -166,7 +174,6 @@ jobs:
                   super.onCreate(savedInstanceState)
                   window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-                  // WebViewAssetLoader serves assets from secure https domain to support Vite ES module scripts
                   val assetLoader = WebViewAssetLoader.Builder()
                       .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
                       .build()
@@ -211,15 +218,14 @@ jobs:
 
                   osmandBridge = OsmAndNavigationBridge(this) { maneuver, street, distanceMeters ->
                       runOnUiThread {
-                          val safeManeuver = maneuver.replace("'", "\\\'")
-                          val safeStreet = street.replace("'", "\\\'")
-                          val js = "window.onOsmAndNavUpdate && window.onOsmAndNavUpdate(\'$safeManeuver\', \'$safeStreet\', $distanceMeters);"
+                          val safeManeuver = maneuver.replace("\"", "")
+                          val safeStreet = street.replace("\"", "")
+                          val js = "window.onOsmAndNavUpdate && window.onOsmAndNavUpdate(\"" + safeManeuver + "\", \"" + safeStreet + "\", " + str(distanceMeters) + ");"
                           webView.evaluateJavascript(js, null)
                       }
                   }
                   osmandBridge.start()
 
-                  // Load via secure domain so ES modules execute without CORS failure
                   webView.loadUrl("https://appassets.androidplatform.net/assets/dist/index.html")
               }
 
@@ -294,7 +300,6 @@ jobs:
           }
           """)
           print("Android native project verified and prepared cleanly!")
-          '
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
