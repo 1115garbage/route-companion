@@ -51,7 +51,7 @@ jobs:
           if os.path.exists("android/app/src/main/aidl"):
               shutil.rmtree("android/app/src/main/aidl")
 
-          # 2. Ensure directories
+          # 2. Ensure directories exist
           os.makedirs("android/app/src/main/res/values", exist_ok=True)
           os.makedirs("android/app/src/main/java/com/routecompanion/app", exist_ok=True)
 
@@ -74,11 +74,10 @@ jobs:
               }
           }
           dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
               repositories {
                   google()
                   mavenCentral()
-                  gradlePluginPortal()
               }
           }
           rootProject.name = "RouteCompanion"
@@ -101,11 +100,6 @@ jobs:
                   targetSdk = 34
                   versionCode = 1
                   versionName = "1.0.0"
-              }
-
-              lint {
-                  abortOnError = false
-                  checkReleaseBuilds = false
               }
 
               buildTypes {
@@ -196,16 +190,17 @@ jobs:
         working-directory: ./android
         run: |
           set +e
-          gradle assembleDebug -x lint -x test --no-daemon --stacktrace 2>&1 | tee build.log
+          gradle assembleDebug -x lint -x test --no-daemon 2>&1 | tee build.log
           STATUS=${PIPESTATUS[0]}
           if [ $STATUS -ne 0 ]; then
-            echo "::error title=Gradle Build Failed::Gradle assembleDebug exited with code $STATUS"
-            tail -n 30 build.log | while IFS= read -r line; do
-              echo "::error::$line"
-            done
+            FAILED_LINE=$(grep -A 3 "What went wrong:" build.log | tail -n +2 | tr '\n' ' ' | head -c 250)
+            if [ -z "$FAILED_LINE" ]; then
+              FAILED_LINE="Build exited with code $STATUS"
+            fi
+            echo "::error title=Gradle Build Error::$FAILED_LINE"
             echo "### ❌ Build Failed Log Summary" >> $GITHUB_STEP_SUMMARY
             echo '```text' >> $GITHUB_STEP_SUMMARY
-            tail -n 100 build.log >> $GITHUB_STEP_SUMMARY
+            tail -n 60 build.log >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             exit $STATUS
           else
