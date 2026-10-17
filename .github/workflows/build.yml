@@ -34,6 +34,12 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Force All-Files Picker
+        run: |
+          sed -i 's/accept="[^"]*"/accept=""/g' src/components/GpxImportModal.tsx 2>/dev/null || true
+          sed -i 's/accept="[^"]*"/accept=""/g' src/App.tsx 2>/dev/null || true
+          sed -i 's/fileChooserParams?.createIntent()/null/g' android/app/src/main/java/com/routecompanion/app/MainActivity.kt 2>/dev/null || true
+
       - name: Build Web Application
         run: |
           mkdir -p src/utils
