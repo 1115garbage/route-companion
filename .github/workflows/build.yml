@@ -1,98 +1,238 @@
-name: Build Android APK
+/**
+ * Turn-by-Turn Navigation & Real-time GPS Service
+ * Uses device GPS hardware and OpenStreetMap (OSM) routing engine
+ */
 
-on:
-  push:
-    branches: [ "main", "master" ]
-  workflow_dispatch:
+export interface NavManeuver {
+  type: string; // 'turn', 'depart', 'arrive', 'continue', 'fork', 'roundabout', etc.
+  modifier?: string; // 'left', 'right', 'slight left', 'slight right', 'sharp left', 'sharp right', 'straight', 'uturn'
+  instruction: string; // "Turn right onto Maple Grove Ave"
+  streetName: string;
+  distanceMeters: number;
+  location: [number, number]; // [lon, lat]
+}
 
-jobs:
-  build:
-    name: Build & Package APK
-    runs-on: ubuntu-latest
+export interface NavigationState {
+  currentManeuver: NavManeuver | null;
+  distanceToManeuverMeters: number;
+  totalDistanceToDestinationMeters: number;
+  estimatedTimeSeconds: number;
+  gpsActive: boolean;
+  gpsAccuracyMeters: number | null;
+  currentSpeedMph: number | null;
+  currentHeading: number | null;
+  lastUpdated: number;
+  source: 'osm-live' | 'gps-direct' | 'simulated';
+  error: string | null;
+}
 
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+/**
+ * Calculates distance in meters between two lat/lon points using the Haversine formula
+ */
+export function calculateDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  if (
+    isNaN(lat1) || isNaN(lon1) || isNaN(lat2) || isNaN(lon2) ||
+    (lat1 === 0 && lon1 === 0) || (lat2 === 0 && lon2 === 0)
+  ) {
+    return Infinity;
+  }
+  const R = 6371000; // Earth's radius in meters
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * (Math.PI / 180)) *
+      Math.cos(lat2 * (Math.PI / 180)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
 
-      - name: Extract Project ZIP
-        run: |
-          LATEST_ZIP=$(ls -t *.zip 2>/dev/null | head -n 1)
-          if [ -n "$LATEST_ZIP" ] && [ -f "$LATEST_ZIP" ]; then
-            echo "Extracting latest archive: $LATEST_ZIP"
-            unzip -o "$LATEST_ZIP"
-            echo "Source unzipped successfully!"
-          fi
+/**
+ * Calculates compass bearing from point 1 to point 2 (0 - 360 degrees)
+ */
+export function calculateBearing(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const y = Math.sin((lon2 - lon1) * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180));
+  const x =
+    Math.cos(lat1 * (Math.PI / 180)) * Math.sin(lat2 * (Math.PI / 180)) -
+    Math.sin(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * Math.cos((lon2 - lon1) * (Math.PI / 180));
+  const brng = (Math.atan2(y, x) * 180) / Math.PI;
+  return (brng + 360) % 360;
+}
 
-      - name: Set up Java JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
+/**
+ * Convert bearing degrees to cardinal direction name
+ */
+export function bearingToDirection(bearing: number): string {
+  const directions = ['North', 'Northeast', 'East', 'Southeast', 'South', 'Southwest', 'West', 'Northwest'];
+  const index = Math.round(bearing / 45) % 8;
+  return directions[index];
+}
 
-      - name: Set up Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+/**
+ * Format distance in feet and miles (or meters/km) for rapid driver glanceability
+ */
+export function formatDistance(meters: number, useMetric = false): string {
+  if (isNaN(meters) || meters < 0) return '0 ft';
 
-      - name: Force All-Files Picker
-        run: |
-          sed -i 's/accept="[^"]*"/accept=""/g' src/components/GpxImportModal.tsx 2>/dev/null || true
-          sed -i 's/accept="[^"]*"/accept=""/g' src/App.tsx 2>/dev/null || true
-          sed -i 's/fileChooserParams?.createIntent()/null/g' android/app/src/main/java/com/routecompanion/app/MainActivity.kt 2>/dev/null || true
+  if (useMetric) {
+    if (meters < 1000) {
+      return `${Math.round(meters)} m`;
+    }
+    return `${(meters / 1000).toFixed(1)} km`;
+  }
 
-      - name: Build Web Application
-        run: |
-          mkdir -p src/utils
-          echo "export async function downloadProjectZip() {}" > src/utils/projectExporter.ts
-          npm install --legacy-peer-deps
-          npm run build
-          mkdir -p android/app/src/main/assets/dist
-          cp -r dist/* android/app/src/main/assets/dist/
-          cp -r dist/* android/app/src/main/assets/
+  // Imperial (US) standard for in-vehicle navigation
+  const feet = meters * 3.28084;
+  if (feet < 1000) {
+    if (feet > 200) {
+      return `${Math.round(feet / 50) * 50} ft`;
+    }
+    return `${Math.max(10, Math.round(feet / 10) * 10)} ft`;
+  }
 
-      - name: Ensure Android Structure & Config
-        run: |
-          mkdir -p android/app/src/main/res/values
-          touch android/app/proguard-rules.pro
-          printf '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <string name="app_name">Route Companion</string>\n</resources>\n' > android/app/src/main/res/values/strings.xml
-          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
-          if [ -d "android/app/src/main/aidl" ]; then
-            rm -rf android/app/src/main/aidl
-          fi
+  const miles = feet / 5280;
+  if (miles < 10) {
+    return `${miles.toFixed(1)} mi`;
+  }
+  return `${Math.round(miles)} mi`;
+}
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: 8.5
-          cache-disabled: true
+/**
+ * Format estimated travel duration in minutes and hours
+ */
+export function formatDuration(seconds: number): string {
+  if (isNaN(seconds) || seconds <= 0) return '1 min';
+  const mins = Math.round(seconds / 60);
+  if (mins < 60) {
+    return `${Math.max(1, mins)} min`;
+  }
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return remMins > 0 ? `${hours}h ${remMins}m` : `${hours}h`;
+}
 
-      - name: Build Android APK
-        working-directory: ./android
-        run: |
-          set +e
-          gradle assembleDebug -x lint -x test --no-daemon --stacktrace 2>&1 | tee build.log
-          STATUS=${PIPESTATUS[0]}
-          if [ $STATUS -ne 0 ]; then
-            echo "### ❌ Build Failed Log Summary" >> $GITHUB_STEP_SUMMARY
-            echo '```text' >> $GITHUB_STEP_SUMMARY
-            tail -n 100 build.log >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            exit $STATUS
-          else
-            echo "### ✅ Android APK Built Successfully!" >> $GITHUB_STEP_SUMMARY
-          fi
+/**
+ * Generates natural driver maneuver instructions from OSRM step
+ */
+export function buildInstructionText(type: string, modifier: string | undefined, streetName: string, destinationName: string): string {
+  const street = streetName && streetName.trim() ? streetName.trim() : '';
+  const mod = (modifier || '').toLowerCase();
+  const t = (type || '').toLowerCase();
 
-      - name: Upload Build Log Artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gradle-build-log
-          path: android/build.log
+  if (t === 'arrive') {
+    return destinationName ? `Arrive at ${destinationName}` : 'Arrive at destination';
+  }
+  if (t === 'depart') {
+    return street ? `Head out onto ${street}` : 'Head toward destination';
+  }
+  if (t === 'merge') {
+    return mod.includes('left')
+      ? (street ? `Merge left onto ${street}` : 'Merge left')
+      : (street ? `Merge right onto ${street}` : 'Merge right');
+  }
+  if (t === 'on ramp' || t === 'off ramp' || t === 'ramp') {
+    return street ? `Take ramp onto ${street}` : 'Take ramp';
+  }
+  if (t === 'fork') {
+    return mod.includes('left')
+      ? (street ? `Keep left at fork onto ${street}` : 'Keep left at fork')
+      : (street ? `Keep right at fork onto ${street}` : 'Keep right at fork');
+  }
+  if (t === 'roundabout' || t === 'rotary') {
+    return street ? `Enter roundabout toward ${street}` : 'Enter roundabout';
+  }
+  if (t === 'end of road') {
+    return mod.includes('left')
+      ? (street ? `Turn left at end onto ${street}` : 'Turn left at end of road')
+      : (street ? `Turn right at end onto ${street}` : 'Turn right at end of road');
+  }
 
-      - name: Upload Ready-to-Install APK
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: OsmAnd-Route-Companion-APK
-          path: android/app/build/outputs/apk/debug/*.apk
-          retention-days: 14
+  switch (mod) {
+    case 'left':
+      return street ? `Turn left onto ${street}` : 'Turn left';
+    case 'right':
+      return street ? `Turn right onto ${street}` : 'Turn right';
+    case 'slight left':
+      return street ? `Bear slightly left onto ${street}` : 'Bear slightly left';
+    case 'slight right':
+      return street ? `Bear slightly right onto ${street}` : 'Bear slightly right';
+    case 'sharp left':
+      return street ? `Make a sharp left onto ${street}` : 'Sharp left';
+    case 'sharp right':
+      return street ? `Make a sharp right onto ${street}` : 'Sharp right';
+    case 'uturn':
+      return street ? `Make a U-turn onto ${street}` : 'Make a U-turn';
+    case 'straight':
+      return street ? `Continue straight on ${street}` : 'Continue straight';
+    default:
+      if (t === 'continue' || t === 'new name') {
+        return street ? `Continue onto ${street}` : 'Continue straight';
+      }
+      return street ? `Proceed onto ${street}` : 'Proceed along route';
+  }
+}
+
+/**
+ * Fetches real turn-by-turn driving route steps from OpenStreetMap OSRM routing engine
+ */
+export async function fetchOsmRoute(
+  startLat: number,
+  startLon: number,
+  destLat: number,
+  destLon: number,
+  destName: string
+): Promise<{ maneuvers: NavManeuver[]; totalDistance: number; totalDuration: number; coordinates: [number, number][] }> {
+  // Free, public OpenStreetMap road-network routing machine
+  const url = `https://router.project-osrm.org/route/v1/driving/${startLon},${startLat};${destLon},${destLat}?steps=true&overview=full&geometries=geojson`;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 7000);
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`Routing server returned HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) {
+      throw new Error('No driving route found between coordinates');
+    }
+
+    const route = data.routes[0];
+    const leg = route.legs?.[0];
+    const steps = leg?.steps || [];
+    const coordinates: [number, number][] = route.geometry?.coordinates || [];
+
+    const maneuvers: NavManeuver[] = steps.map((s: any) => {
+      const type = s.maneuver?.type || 'turn';
+      const modifier = s.maneuver?.modifier;
+      const streetName = s.name || '';
+      const instruction = buildInstructionText(type, modifier, streetName, destName);
+      const location: [number, number] = s.maneuver?.location || [destLon, destLat];
+
+      return {
+        type,
+        modifier,
+        instruction,
+        streetName,
+        distanceMeters: s.distance || 0,
+        location,
+      };
+    });
+
+    return {
+      maneuvers,
+      totalDistance: route.distance || 0,
+      totalDuration: route.duration || 0,
+      coordinates,
+    };
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    throw err;
+  }
+}
