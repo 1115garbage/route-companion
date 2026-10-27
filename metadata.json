@@ -1,0 +1,6 @@
+{
+  "name": "OsmAnd Route Companion",
+  "description": "High-contrast Android customer route assistant for OsmAnd with sequential GPX stop guidance, address display, and one-tap stop skip.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

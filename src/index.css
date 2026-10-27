@@ -1,0 +1,82 @@
+@import "tailwindcss";
+
+@layer utilities {
+  .pb-safe {
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom, 0.75rem));
+  }
+  .pt-safe {
+    padding-top: max(0.5rem, env(safe-area-inset-top, 0.5rem));
+  }
+}
+
+:root {
+  color-scheme: dark;
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Prevent accidental pull-to-refresh on Android when swiping cards in truck mount */
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background-color: #000000;
+}
+
+body {
+  overscroll-behavior-y: contain;
+  touch-action: manipulation;
+}
+
+/* Ensure Leaflet maps render at 100% full screen inside mobile WebViews */
+.leaflet-container {
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 100% !important;
+  background-color: #09090b !important;
+  z-index: 1;
+}
+
+.leaflet-pane {
+  z-index: 2;
+}
+
+.leaflet-top,
+.leaflet-bottom {
+  z-index: 10;
+}
+
+/* High-contrast AMOLED Dark styling for OpenStreetMap tiles */
+.dark-map-tiles {
+  filter: brightness(0.7) invert(0.92) contrast(1.4) hue-rotate(185deg) saturate(0.4);
+}
+
+/* Custom dark styling for Leaflet customer popups */
+.custom-dark-popup .leaflet-popup-content-wrapper {
+  background: #0f172a !important;
+  color: #ffffff !important;
+  border: 1px solid #334155 !important;
+  border-radius: 12px !important;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.8) !important;
+  padding: 4px 8px !important;
+}
+
+.custom-dark-popup .leaflet-popup-tip {
+  background: #0f172a !important;
+  border: 1px solid #334155 !important;
+}
+
+.custom-dark-popup .leaflet-popup-content {
+  margin: 6px 6px !important;
+}
+
+.custom-dark-popup .leaflet-popup-close-button {
+  color: #94a3b8 !important;
+  padding: 6px 8px !important;
+}
+

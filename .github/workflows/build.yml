@@ -5,6 +5,9 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build & Package APK
@@ -14,13 +17,15 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Extract Project ZIP (if uploaded as archive)
+      - name: Extract Latest Project ZIP (if uploaded without extracted src)
         run: |
-          LATEST_ZIP=$(ls -t *.zip 2>/dev/null | head -n 1)
-          if [ -n "$LATEST_ZIP" ] && [ -f "$LATEST_ZIP" ]; then
-            echo "Extracting latest archive: $LATEST_ZIP"
-            unzip -o "$LATEST_ZIP"
-            echo "Source unzipped successfully!"
+          if [ ! -d "src" ]; then
+            LATEST_ZIP=$(ls -t Garbage_Route_Source.zip *.zip 2>/dev/null | head -n 1)
+            if [ -n "$LATEST_ZIP" ] && [ -f "$LATEST_ZIP" ]; then
+              echo "Extracting latest source archive: $LATEST_ZIP"
+              unzip -o "$LATEST_ZIP"
+              echo "Archive $LATEST_ZIP unzipped successfully!"
+            fi
           fi
 
       - name: Set up Java JDK 17
@@ -34,12 +39,17 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Force All-Files Picker
+        run: |
+          sed -i 's/accept="[^"]*"/accept=""/g' src/components/GpxImportModal.tsx 2>/dev/null || true
+          sed -i 's/accept="[^"]*"/accept=""/g' src/App.tsx 2>/dev/null || true
+          sed -i 's/fileChooserParams?.createIntent()/null/g' android/app/src/main/java/com/routecompanion/app/MainActivity.kt 2>/dev/null || true
+
       - name: Build Web Application
         run: |
-          mkdir -p src/utils
-          echo "export async function downloadProjectZip() {}" > src/utils/projectExporter.ts
           npm install --legacy-peer-deps
           npm run build
+          rm -rf android/app/src/main/assets/*
           mkdir -p android/app/src/main/assets/dist
           cp -r dist/* android/app/src/main/assets/
           cp -r dist/* android/app/src/main/assets/dist/
@@ -48,7 +58,8 @@ jobs:
         run: |
           mkdir -p android/app/src/main/res/values
           touch android/app/proguard-rules.pro
-          printf '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <string name="app_name">Route Companion</string>\n</resources>\n' > android/app/src/main/res/values/strings.xml
+          printf '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <string name="app_name">Garbage Route</string>\n</resources>\n' > android/app/src/main/res/values/strings.xml
+          printf '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="ic_launcher_background">#051d08</color>\n</resources>\n' > android/app/src/main/res/values/colors.xml
           echo "sdk.dir=$ANDROID_HOME" > android/local.properties
 
       - name: Setup Gradle
@@ -57,15 +68,34 @@ jobs:
           gradle-version: 8.5
           cache-disabled: true
 
-      - name: Build Android Debug APK
+      - name: Build Android APK
+        working-directory: ./android
         run: |
-          cd android
-          chmod +x ./gradlew || true
-          gradle assembleDebug --no-daemon --stacktrace
+          set +e
+          gradle assembleDebug -x lint -x test --no-daemon --stacktrace 2>&1 | tee build.log
+          STATUS=${PIPESTATUS[0]}
+          if [ $STATUS -ne 0 ]; then
+            echo "### ❌ Build Failed Log Summary" >> $GITHUB_STEP_SUMMARY
+            echo '```text' >> $GITHUB_STEP_SUMMARY
+            tail -n 100 build.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit $STATUS
+          else
+            echo "### ✅ Android APK Built Successfully!" >> $GITHUB_STEP_SUMMARY
+            echo "Download the **Garbage-Route-APK** artifact below to install on your Samsung phone." >> $GITHUB_STEP_SUMMARY
+          fi
 
-      - name: Upload Debug APK Artifact
+      - name: Upload Build Log Artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
+          name: gradle-build-log
+          path: android/build.log
+
+      - name: Upload Ready-to-Install APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Garbage-Route-APK
           path: android/app/build/outputs/apk/debug/*.apk
           retention-days: 14
