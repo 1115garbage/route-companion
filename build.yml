@@ -1,0 +1,170 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Package APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Select and Validate Source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Commit: $GITHUB_SHA"
+          echo "Run: $GITHUB_RUN_ID"
+
+          if [ -f "Garbage_Route_Source.zip" ]; then
+            echo "Using Garbage_Route_Source.zip as the source of truth."
+            rm -rf /tmp/garbage-route-source
+            mkdir -p /tmp/garbage-route-source
+            unzip -q -o Garbage_Route_Source.zip -d /tmp/garbage-route-source
+
+            SOURCE_ROOT="/tmp/garbage-route-source"
+            if [ ! -f "$SOURCE_ROOT/package.json" ]; then
+              echo "ERROR: package.json was not found at the ZIP root."
+              find "$SOURCE_ROOT" -maxdepth 4 -name package.json -print
+              exit 1
+            fi
+
+            # Overlay archive project files but retain the workflow from GitHub.
+            rsync -a --exclude='.github/' "$SOURCE_ROOT/" ./
+          else
+            echo "No source ZIP found; using checked-out repository files."
+          fi
+
+          test -f package.json
+          test -f src/App.tsx
+          test -f src/utils/useGpsTracker.ts
+          test -f src/components/StopCard.tsx
+          test -d android
+          echo "Source validation passed."
+
+          echo "=== Arrival-zone source references ==="
+          grep -n -E 'baseConfirmRadius|effectiveConfirmZone|accuracyTolerance|105\.0' src/utils/useGpsTracker.ts || true
+          echo "=== Turn-warning source references ==="
+          grep -n -E '600|500' src/App.tsx src/components/StopCard.tsx || true
+
+      - name: Set up Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Web Dependencies
+        run: |
+          set -euo pipefail
+          if [ -f package-lock.json ]; then
+            npm ci --legacy-peer-deps
+          else
+            echo "WARNING: package-lock.json is missing; using npm install."
+            npm install --legacy-peer-deps
+          fi
+
+      - name: Apply Existing File Picker Compatibility Changes
+        run: |
+          sed -i 's/accept="[^"]*"/accept=""/g' src/components/GpxImportModal.tsx 2>/dev/null || true
+          sed -i 's/accept="[^"]*"/accept=""/g' src/App.tsx 2>/dev/null || true
+          sed -i 's/fileChooserParams?.createIntent()/null/g' android/app/src/main/java/com/routecompanion/app/MainActivity.kt 2>/dev/null || true
+
+      - name: Build Web Application
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build
+          test -f dist/index.html
+
+          # Replace Android web assets with freshly built files.
+          rm -rf android/app/src/main/assets
+          mkdir -p android/app/src/main/assets/dist
+          # Keep both locations because the Android wrapper may load either path.
+          cp -a dist/. android/app/src/main/assets/
+          cp -a dist/. android/app/src/main/assets/dist/
+
+          SOURCE_ARCHIVE_SHA="unavailable"
+          if [ -f Garbage_Route_Source.zip ]; then
+            SOURCE_ARCHIVE_SHA="$(sha256sum Garbage_Route_Source.zip | cut -d ' ' -f 1)"
+          fi
+          cat > android/app/src/main/assets/build-info.txt <<EOFINFO
+          commit=$GITHUB_SHA
+          run_id=$GITHUB_RUN_ID
+          run_number=$GITHUB_RUN_NUMBER
+          source_archive_sha256=$SOURCE_ARCHIVE_SHA
+          EOFINFO
+          cp android/app/src/main/assets/build-info.txt android/app/src/main/assets/dist/build-info.txt
+
+          echo "=== Generated JavaScript files ==="
+          find android/app/src/main/assets/dist -type f -name '*.js' -print
+
+          echo "=== Check generated assets for known forced 105-metre rule ==="
+          if grep -R -F 'Math.max(baseConfirmRadius, 105.0)' android/app/src/main/assets/dist; then
+            echo "ERROR: Known forced 105-metre expression is present in generated assets."
+            exit 1
+          fi
+          echo "Web build and asset checks completed."
+
+      - name: Ensure Android Structure & Config
+        run: |
+          set -euo pipefail
+          mkdir -p android/app/src/main/res/values
+          touch android/app/proguard-rules.pro
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="utf-8"?>' \
+            '<resources>' \
+            '    <string name="app_name">Garbage Route</string>' \
+            '</resources>' \
+            > android/app/src/main/res/values/strings.xml
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="utf-8"?>' \
+            '<resources>' \
+            '    <color name="ic_launcher_background">#051d08</color>' \
+            '</resources>' \
+            > android/app/src/main/res/values/colors.xml
+          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.5
+          cache-disabled: true
+
+      - name: Build Android APK
+        working-directory: ./android
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle assembleDebug -x lint -x test --no-daemon --stacktrace 2>&1 | tee build.log
+
+      - name: Upload Build Log Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-build-log
+          path: android/build.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload Ready-to-Install APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Garbage-Route-APK
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
