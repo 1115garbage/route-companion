@@ -75,8 +75,7 @@ class SpeechCoordinator {
     }
 
     if (item.priority === 'high') {
-      // High priority (Customer arrival, next customer, turnaround)
-      // Discard any queued lower-priority turn announcements so they don't delay customer info
+      // Discard queued lower-priority turn announcements so they don't delay customer info
       this.queue = this.queue.filter((q) => q.priority === 'high');
 
       // If currently speaking a normal priority turn, stop it immediately
@@ -458,6 +457,27 @@ export function formatHouseNumberForSpeech(houseNumber: string | undefined | nul
 }
 
 /**
+ * Arrival announcement: "Arrival" followed by the house number only.
+ * Does not change next-customer or turnaround announcements.
+ */
+export function announceArrival(houseNumber?: string) {
+  if (typeof window === 'undefined') return;
+
+  const spokenHouse = formatHouseNumberForSpeech(houseNumber);
+  const text = spokenHouse
+    ? `Arrival, ${spokenHouse}.`
+    : 'Arrival.';
+
+  speechCoordinator.speak({
+    id: `arrival_${Date.now()}`,
+    text,
+    priority: 'high',
+    createdAt: Date.now(),
+    maxAgeMs: 15000,
+  });
+}
+
+/**
  * Text-to-speech announcement for hands-free driving
  * Concise customer-transition announcement: "Next customer, [Name], [digit-by-digit house number]."
  * Examples:
@@ -474,7 +494,7 @@ export function announceStop(customerName: string, houseNumber?: string, _deprec
   cleanName = cleanName.replace(/^(?:stop\s*#?\d+\s*[-:–—|]\s*|#?0+\d+\s*[-:–—|]\s*)/i, '').trim();
   cleanName = cleanName.replace(/^(?:customer\s*#?\d+\s*[-:–—|:]\s*)/i, '').trim();
 
-  // Convert house number to individual digit-by-digit spoken words (e.g. "6589" -> "six five eight nine", "007" -> "zero zero seven")
+  // Convert house number to individual digit-by-digit spoken words
   const spokenHouse = formatHouseNumberForSpeech(houseNumber);
 
   let text = '';
@@ -619,13 +639,13 @@ export function releaseWakeLock() {
  */
 export function getNavigationLinks(lat: number, lon: number, label: string) {
   const encodedLabel = encodeURIComponent(label || 'Customer Stop');
-  
+
   // Standard geo URI (will open OsmAnd or default Android map app)
   const geoUri = `geo:${lat},${lon}?q=${lat},${lon}(${encodedLabel})`;
-  
+
   // OsmAnd direct intent URI
   const osmandUri = `osmand.navigation:q=${lat},${lon}`;
-  
+
   // Google Maps fallback web link
   const gmapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}`;
 
