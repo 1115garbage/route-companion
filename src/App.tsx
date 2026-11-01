@@ -7,7 +7,14 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { RouteData, RouteStop, AppSettings } from './types/route';
 import { parseGPX, getStopHouseNumber } from './utils/gpxParser';
 import { SAMPLE_GPX_ROUTES } from './utils/sampleRoutes';
-import { triggerHaptic, announceStop, requestWakeLock, releaseWakeLock, cancelTurnAnnouncements } from './utils/voiceAndHaptics';
+import {
+  triggerHaptic,
+  announceStop,
+  announceArrival,
+  requestWakeLock,
+  releaseWakeLock,
+  cancelTurnAnnouncements,
+} from './utils/voiceAndHaptics';
 import { StopCard } from './components/StopCard';
 import { GpxImportModal } from './components/GpxImportModal';
 import { RouteListDrawer } from './components/RouteListDrawer';
@@ -15,12 +22,11 @@ import { SettingsModal } from './components/SettingsModal';
 import { RouteCompletionView } from './components/RouteCompletionView';
 import { ExportModal } from './components/ExportModal';
 import { useGpsTracker } from './utils/useGpsTracker';
-import { 
-  Compass, 
-  Upload, 
+import {
+  Upload,
   RotateCcw,
   Sparkles,
-  CheckCircle2
+  CheckCircle2,
 } from 'lucide-react';
 
 const STORAGE_KEY = 'osmand_route_assistant_v1';
@@ -32,9 +38,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   hapticFeedback: true,
   keepScreenAwake: true,
   extraLargeText: false,
-  arrivalRadiusMeters: 152.4, // Configurable 500-foot proximity window default
-  arrivalConfirmFeet: 150, // Configurable 150-foot arrival confirmation threshold default
-  turnWarningDistancesFeet: [500], // Early advance turn warning distance in feet (followed by direct turn instruction at turn point)
+  arrivalRadiusMeters: 152.4,
+  arrivalConfirmFeet: 150,
+  turnWarningDistancesFeet: [500],
 };
 
 export default function App() {
@@ -46,8 +52,9 @@ export default function App() {
         return { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
       }
     } catch (e) {
-      // fallback
+      // Use default settings if loading fails.
     }
+
     return DEFAULT_SETTINGS;
   });
 
@@ -55,18 +62,33 @@ export default function App() {
   const [routeData, setRouteData] = useState<RouteData | null>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
+
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (parsed && Array.isArray(parsed.stops) && parsed.stops.length > 0) {
-          // Sanitize/re-extract house numbers so any stale "002" stop sequence numbers
-          // are restored to the genuine house number extracted from the customer's delivery address!
-          const healedStops = parsed.stops.map((s: RouteStop, idx: number) => {
-            const trueHouseNumber = getStopHouseNumber(s, idx);
-            return {
-              ...s,
-              houseNumber: trueHouseNumber !== '—' ? trueHouseNumber : (s.houseNumber && !/^0+\d+$/.test(s.houseNumber) ? s.houseNumber : ''),
-            };
-          });
+
+        if (
+          parsed &&
+          Array.isArray(parsed.stops) &&
+          parsed.stops.length > 0
+        ) {
+          // Restore genuine house numbers instead of stale stop sequence numbers.
+          const healedStops = parsed.stops.map(
+            (s: RouteStop, idx: number) => {
+              const trueHouseNumber = getStopHouseNumber(s, idx);
+
+              return {
+                ...s,
+                houseNumber:
+                  trueHouseNumber !== '—'
+                    ? trueHouseNumber
+                    : s.houseNumber &&
+                        !/^0+\d+$/.test(s.houseNumber)
+                      ? s.houseNumber
+                      : '',
+              };
+            },
+          );
+
           return {
             ...parsed,
             stops: healedStops,
@@ -74,13 +96,17 @@ export default function App() {
         }
       }
     } catch (e) {
-      // fallback
+      // Fall back to the sample route.
     }
 
-    // Default: initialize with first sample route so app is immediately usable
+    // Initialize with the first sample route.
     try {
       const defaultPreset = SAMPLE_GPX_ROUTES[0];
-      const parsed = parseGPX(defaultPreset.gpxXml, defaultPreset.title);
+      const parsed = parseGPX(
+        defaultPreset.gpxXml,
+        defaultPreset.title,
+      );
+
       return {
         id: defaultPreset.id,
         name: parsed.routeName,
@@ -95,18 +121,25 @@ export default function App() {
     }
   });
 
-  // Modals & Drawers state
+  // Modals and drawer state
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isExportOpen, setIsExportOpen] = useState(false);
-  const [skipToast, setSkipToast] = useState<{ message: string; previousIndex: number } | null>(null);
+
+  const [skipToast, setSkipToast] = useState<{
+    message: string;
+    previousIndex: number;
+  } | null>(null);
+
   const [arrivalToast, setArrivalToast] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Direct Android file picker import handler
-  const handleDirectFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleDirectFileImport = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -116,33 +149,47 @@ export default function App() {
       const { stops, routeName } = parseGPX(text, cleanFileName);
 
       if (stops.length === 0) {
-        throw new Error('No waypoints found in the selected GPX file.');
+        throw new Error(
+          'No waypoints found in the selected GPX file.',
+        );
       }
 
-      if (settings.hapticFeedback) triggerHaptic('complete');
+      if (settings.hapticFeedback) {
+        triggerHaptic('complete');
+      }
 
-      // Replace sample customers with the imported customers
+      // Replace the current route with the imported customers.
       const newRoute: RouteData = {
         id: `route-${Date.now().toString(36)}`,
         name: routeName || file.name,
         filename: file.name,
-        stops: stops, // exact file order preserved
+        stops,
         currentIndex: 0,
         importedAt: Date.now(),
         lastUpdated: Date.now(),
       };
 
       setRouteData(newRoute);
+
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(newRoute));
+        localStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify(newRoute),
+        );
       } catch (err) {
         console.error('Storage error', err);
       }
 
-      setArrivalToast(`Imported ${file.name} (${stops.length} stops)`);
+      setArrivalToast(
+        `Imported ${file.name} (${stops.length} stops)`,
+      );
+
       setTimeout(() => setArrivalToast(null), 4000);
     } catch (err: any) {
-      setArrivalToast(err.message || 'Failed to read or parse GPX file.');
+      setArrivalToast(
+        err.message || 'Failed to read or parse GPX file.',
+      );
+
       setTimeout(() => setArrivalToast(null), 4000);
     } finally {
       if (e.target) {
@@ -151,29 +198,41 @@ export default function App() {
     }
   };
 
-  // Sync route data to localStorage whenever it changes
+  // Sync route data to localStorage whenever it changes.
   useEffect(() => {
     if (routeData) {
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(routeData));
+        localStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify(routeData),
+        );
       } catch (e) {
-        console.error('Failed to save route to localStorage', e);
+        console.error(
+          'Failed to save route to localStorage',
+          e,
+        );
       }
     } else {
       localStorage.removeItem(STORAGE_KEY);
     }
   }, [routeData]);
 
-  // Sync settings to localStorage
+  // Sync settings to localStorage.
   useEffect(() => {
     try {
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+      localStorage.setItem(
+        SETTINGS_KEY,
+        JSON.stringify(settings),
+      );
     } catch (e) {
-      console.error('Failed to save settings', e);
+      console.error(
+        'Failed to save settings',
+        e,
+      );
     }
   }, [settings]);
 
-  // Handle Screen WakeLock
+  // Handle Screen WakeLock.
   useEffect(() => {
     if (settings.keepScreenAwake) {
       requestWakeLock();
@@ -186,35 +245,77 @@ export default function App() {
     };
   }, [settings.keepScreenAwake]);
 
-  // Voice announcement on customer stop change
+  // Existing voice announcement when the active customer changes.
+  // Keep this behavior unchanged.
   const isFirstMount = useRef(true);
+
   useEffect(() => {
     if (isFirstMount.current) {
       isFirstMount.current = false;
       return;
     }
-    if (settings.voiceAnnouncement && routeData && routeData.stops[routeData.currentIndex]) {
+
+    if (
+      settings.voiceAnnouncement &&
+      routeData &&
+      routeData.stops[routeData.currentIndex]
+    ) {
       const current = routeData.stops[routeData.currentIndex];
-      const houseNumber = getStopHouseNumber(current, routeData.currentIndex);
-      announceStop(current.name, houseNumber !== '—' ? houseNumber : '');
+
+      const houseNumber = getStopHouseNumber(
+        current,
+        routeData.currentIndex,
+      );
+
+      announceStop(
+        current.name,
+        houseNumber !== '—' ? houseNumber : '',
+      );
     }
-  }, [routeData?.currentIndex, settings.voiceAnnouncement]);
+  }, [
+    routeData?.currentIndex,
+    settings.voiceAnnouncement,
+  ]);
 
   const isDark = settings.theme === 'amoled-black';
 
-  // Automatic GPS Arrival Advance (within ~50 feet / 15m)
+  // Automatic GPS arrival advance.
   const handleAutoArrive = () => {
     if (!routeData) return;
-    if (settings.hapticFeedback) triggerHaptic('complete');
 
-    const arrivedStop = routeData.stops[routeData.currentIndex];
+    if (settings.hapticFeedback) {
+      triggerHaptic('complete');
+    }
+
+    const arrivedIndex = routeData.currentIndex;
+    const arrivedStop = routeData.stops[arrivedIndex];
+
+    /*
+     * NEW ARRIVAL ANNOUNCEMENT:
+     * Say "Arrival" followed by the house number only.
+     * The separate announceArrival function leaves the existing
+     * customer-change and turnaround announcements unchanged.
+     */
+    if (settings.voiceAnnouncement && arrivedStop) {
+      const arrivalHouseNumber = getStopHouseNumber(
+        arrivedStop,
+        arrivedIndex,
+      );
+
+      announceArrival(
+        arrivalHouseNumber !== '—'
+          ? arrivalHouseNumber
+          : '',
+      );
+    }
 
     setRouteData((prev) => {
       if (!prev) return null;
+
       const nextIndex = prev.currentIndex + 1;
       const updatedStops = [...prev.stops];
 
-      // Mark current stop as completed
+      // Mark the current stop as completed.
       if (updatedStops[prev.currentIndex]) {
         updatedStops[prev.currentIndex] = {
           ...updatedStops[prev.currentIndex],
@@ -232,35 +333,53 @@ export default function App() {
     });
 
     if (arrivedStop) {
-      setArrivalToast(`Auto-Arrived: #${arrivedStop.orderIndex} ${arrivedStop.name}`);
+      setArrivalToast(
+        `Auto-Arrived: #${arrivedStop.orderIndex} ${arrivedStop.name}`,
+      );
+
       setTimeout(() => {
         setArrivalToast(null);
       }, 3500);
     }
   };
 
-  // Mark Customer as Picked Up (Manual confirmation)
+  // Mark Customer as Picked Up (Manual confirmation).
   const lastMarkPickedUpTimeRef = useRef<number>(0);
+
   const handleMarkPickedUp = () => {
     if (!routeData) return;
+
     const now = Date.now();
-    // Guard against repeated rapid events or double clicks completing multiple customers
+
+    // Prevent repeated rapid events from completing multiple customers.
     if (now - lastMarkPickedUpTimeRef.current < 750) return;
+
     lastMarkPickedUpTimeRef.current = now;
 
-    if (settings.hapticFeedback) triggerHaptic('complete');
+    if (settings.hapticFeedback) {
+      triggerHaptic('complete');
+    }
+
     cancelTurnAnnouncements();
 
     const currentIdx = routeData.currentIndex;
+
     if (currentIdx >= routeData.stops.length) return;
+
     const pickedUpStop = routeData.stops[currentIdx];
 
     setRouteData((prev) => {
-      if (!prev || prev.currentIndex >= prev.stops.length) return prev;
+      if (
+        !prev ||
+        prev.currentIndex >= prev.stops.length
+      ) {
+        return prev;
+      }
+
       const prevIdx = prev.currentIndex;
       const updatedStops = [...prev.stops];
 
-      // 1. Mark current stop as completed
+      // Mark current stop as completed.
       if (updatedStops[prevIdx]) {
         updatedStops[prevIdx] = {
           ...updatedStops[prevIdx],
@@ -269,9 +388,13 @@ export default function App() {
         };
       }
 
-      // 2. Advance to the next uncompleted customer in the existing route sequence
+      // Advance to the next uncompleted customer.
       let nextIndex = prevIdx + 1;
-      while (nextIndex < updatedStops.length && updatedStops[nextIndex].status === 'completed') {
+
+      while (
+        nextIndex < updatedStops.length &&
+        updatedStops[nextIndex].status === 'completed'
+      ) {
         nextIndex++;
       }
 
@@ -284,23 +407,30 @@ export default function App() {
     });
 
     if (pickedUpStop) {
-      setArrivalToast(`Picked Up: #${pickedUpStop.orderIndex} ${pickedUpStop.name}`);
+      setArrivalToast(
+        `Picked Up: #${pickedUpStop.orderIndex} ${pickedUpStop.name}`,
+      );
+
       setTimeout(() => {
         setArrivalToast(null);
       }, 3500);
     }
   };
 
-  // Skip Customer Immediately
+  // Skip Customer Immediately.
   const handleSkipCustomer = () => {
     if (!routeData) return;
-    if (settings.hapticFeedback) triggerHaptic('skip');
+
+    if (settings.hapticFeedback) {
+      triggerHaptic('skip');
+    }
 
     const skippedStop = routeData.stops[routeData.currentIndex];
     const prevIdx = routeData.currentIndex;
 
     setRouteData((prev) => {
       if (!prev) return null;
+
       const nextIndex = prev.currentIndex + 1;
       const updatedStops = [...prev.stops];
 
@@ -320,25 +450,30 @@ export default function App() {
       };
     });
 
-    // Show temporary Undo toast
+    // Show temporary Undo toast.
     if (skippedStop) {
       setSkipToast({
         message: `Skipped: #${skippedStop.orderIndex} ${skippedStop.name}`,
         previousIndex: prevIdx,
       });
+
       setTimeout(() => {
         setSkipToast(null);
       }, 4000);
     }
   };
 
-  // Return to Previous Customer
+  // Return to Previous Customer.
   const handlePreviousCustomer = () => {
     if (!routeData || routeData.currentIndex <= 0) return;
-    if (settings.hapticFeedback) triggerHaptic('undo');
+
+    if (settings.hapticFeedback) {
+      triggerHaptic('undo');
+    }
 
     setRouteData((prev) => {
       if (!prev) return null;
+
       return {
         ...prev,
         currentIndex: prev.currentIndex - 1,
@@ -347,21 +482,28 @@ export default function App() {
     });
   };
 
-  // Undo accidental skip from toast
+  // Undo accidental skip from toast.
   const handleUndoSkip = () => {
     if (!skipToast || !routeData) return;
-    if (settings.hapticFeedback) triggerHaptic('undo');
+
+    if (settings.hapticFeedback) {
+      triggerHaptic('undo');
+    }
 
     const restoreIndex = skipToast.previousIndex;
+
     setRouteData((prev) => {
       if (!prev) return null;
+
       const updatedStops = [...prev.stops];
+
       if (updatedStops[restoreIndex]) {
         updatedStops[restoreIndex] = {
           ...updatedStops[restoreIndex],
           status: 'pending',
         };
       }
+
       return {
         ...prev,
         stops: updatedStops,
@@ -369,36 +511,49 @@ export default function App() {
         lastUpdated: Date.now(),
       };
     });
+
     setSkipToast(null);
   };
 
-  // Jump to specific stop from list
+  // Jump to a specific stop from the list.
   const handleJumpToStop = (index: number) => {
     if (!routeData) return;
-    if (settings.hapticFeedback) triggerHaptic('tap');
+
+    if (settings.hapticFeedback) {
+      triggerHaptic('tap');
+    }
 
     setRouteData((prev) => {
       if (!prev) return null;
+
       return {
         ...prev,
-        currentIndex: Math.max(0, Math.min(index, prev.stops.length)),
+        currentIndex: Math.max(
+          0,
+          Math.min(index, prev.stops.length),
+        ),
         lastUpdated: Date.now(),
       };
     });
   };
 
-  // Reset route progress to Stop 1
+  // Reset route progress to Stop 1.
   const handleResetProgress = () => {
     if (!routeData) return;
-    if (settings.hapticFeedback) triggerHaptic('tap');
+
+    if (settings.hapticFeedback) {
+      triggerHaptic('tap');
+    }
 
     setRouteData((prev) => {
       if (!prev) return null;
+
       const resetStops = prev.stops.map((s) => ({
         ...s,
         status: 'pending' as const,
         statusTimestamp: undefined,
       }));
+
       return {
         ...prev,
         stops: resetStops,
@@ -408,9 +563,16 @@ export default function App() {
     });
   };
 
-  // Handle successful import of new GPX
-  const handleImportSuccess = (stops: RouteStop[], routeName: string, filename: string) => {
-    if (settings.hapticFeedback) triggerHaptic('tap');
+  // Handle successful import of a new GPX.
+  const handleImportSuccess = (
+    stops: RouteStop[],
+    routeName: string,
+    filename: string,
+  ) => {
+    if (settings.hapticFeedback) {
+      triggerHaptic('tap');
+    }
+
     const newRoute: RouteData = {
       id: `route-${Date.now().toString(36)}`,
       name: routeName,
@@ -420,42 +582,53 @@ export default function App() {
       importedAt: Date.now(),
       lastUpdated: Date.now(),
     };
+
     setRouteData(newRoute);
   };
 
-  // Clear current route
+  // Clear current route.
   const handleClearRoute = () => {
     setRouteData(null);
   };
 
-  const currentStop = routeData && routeData.currentIndex < routeData.stops.length
-    ? routeData.stops[routeData.currentIndex]
-    : null;
+  const currentStop =
+    routeData &&
+    routeData.currentIndex < routeData.stops.length
+      ? routeData.stops[routeData.currentIndex]
+      : null;
 
-  const previousStop = routeData && routeData.currentIndex > 0
-    ? routeData.stops[routeData.currentIndex - 1]
-    : null;
+  const previousStop =
+    routeData && routeData.currentIndex > 0
+      ? routeData.stops[routeData.currentIndex - 1]
+      : null;
 
-  const nextStop = routeData && routeData.currentIndex < routeData.stops.length - 1
-    ? routeData.stops[routeData.currentIndex + 1]
-    : null;
+  const nextStop =
+    routeData &&
+    routeData.currentIndex < routeData.stops.length - 1
+      ? routeData.stops[routeData.currentIndex + 1]
+      : null;
 
-  // Route context for parallel road rejection and driving distance tracking
-  const [routeCoordinates, setRouteCoordinates] = useState<[number, number][]>([]);
-  const [roadRemainingMeters, setRoadRemainingMeters] = useState<number | null>(null);
+  // Route context for parallel road rejection and driving distance tracking.
+  const [routeCoordinates, setRouteCoordinates] =
+    useState<[number, number][]>([]);
 
-  // Clear route context when active stop changes
+  const [roadRemainingMeters, setRoadRemainingMeters] =
+    useState<number | null>(null);
+
+  // Clear route context when the active stop changes.
   useEffect(() => {
     setRouteCoordinates([]);
     setRoadRemainingMeters(null);
   }, [currentStop?.id]);
 
-  // Backup route data before simulation so exiting restores original state cleanly
+  // Backup route data before simulation.
   const backupRouteDataRef = useRef<RouteData | null>(null);
 
   const handleSimulationStart = useCallback(() => {
     if (routeData && !backupRouteDataRef.current) {
-      backupRouteDataRef.current = JSON.parse(JSON.stringify(routeData));
+      backupRouteDataRef.current = JSON.parse(
+        JSON.stringify(routeData),
+      );
     }
   }, [routeData]);
 
@@ -466,7 +639,7 @@ export default function App() {
     }
   }, []);
 
-  // Real GPS hardware tracking & configurable arrival engine with full route simulation
+  // GPS tracking and configurable arrival engine.
   const {
     location: userLocation,
     gpsStatus,
@@ -494,35 +667,48 @@ export default function App() {
     simulateCurbsidePassThrough,
     diagLogs,
   } = useGpsTracker(
-    currentStop, 
-    previousStop, 
-    nextStop, 
-    handleAutoArrive, 
+    currentStop,
+    previousStop,
+    nextStop,
+    handleAutoArrive,
     settings.arrivalRadiusMeters || 152.4,
-    (settings.arrivalConfirmFeet ? settings.arrivalConfirmFeet * 0.3048 : 45.72),
+    settings.arrivalConfirmFeet
+      ? settings.arrivalConfirmFeet * 0.3048
+      : 45.72,
     roadRemainingMeters,
     routeCoordinates,
     routeData?.stops,
     handleJumpToStop,
     handleResetProgress,
     handleSimulationStart,
-    handleExitSimulation
+    handleExitSimulation,
   );
 
-  const isRouteFinished = routeData && routeData.currentIndex >= routeData.stops.length;
+  const isRouteFinished =
+    routeData &&
+    routeData.currentIndex >= routeData.stops.length;
 
-  const completedCount = routeData ? routeData.stops.filter((s) => s.status === 'completed').length : 0;
-  const skippedCount = routeData ? routeData.stops.filter((s) => s.status === 'skipped').length : 0;
+  const completedCount = routeData
+    ? routeData.stops.filter(
+        (s) => s.status === 'completed',
+      ).length
+    : 0;
+
+  const skippedCount = routeData
+    ? routeData.stops.filter(
+        (s) => s.status === 'skipped',
+      ).length
+    : 0;
 
   return (
-    <div 
+    <div
       className={`h-dvh max-h-dvh w-full overflow-hidden flex flex-col font-sans transition-colors duration-150 ${
-        isDark 
-          ? 'bg-black text-white' 
+        isDark
+          ? 'bg-black text-white'
           : 'bg-white text-black'
       }`}
     >
-      {/* Hidden File Picker Input for Android File Picker */}
+      {/* Hidden file picker input for Android file picker */}
       <input
         ref={fileInputRef}
         type="file"
@@ -530,9 +716,9 @@ export default function App() {
         className="hidden"
       />
 
-      {/* Main Screen Container - Fitted mobile viewport starting flush from top */}
+      {/* Main screen container */}
       <main className="flex-1 w-full max-w-md mx-auto flex flex-col px-2.5 pt-1 pb-1 sm:px-3 sm:py-1.5 relative overflow-hidden">
-        {/* Auto-Arrival Banner (Confirms automatic arrival without requiring manual input) */}
+        {/* Auto-arrival banner */}
         {arrivalToast && (
           <div className="absolute top-4 left-4 right-4 z-30 animate-in slide-in-from-top duration-200">
             <div className="bg-emerald-500 text-black px-4 py-2.5 rounded-2xl shadow-2xl flex items-center gap-2 border-2 border-emerald-300">
@@ -544,13 +730,14 @@ export default function App() {
           </div>
         )}
 
-        {/* Undo Toast when a customer was skipped */}
+        {/* Undo toast when a customer was skipped */}
         {skipToast && (
           <div className="absolute top-4 left-4 right-4 z-30 animate-in slide-in-from-top duration-200">
             <div className="bg-amber-400 text-black px-4 py-2.5 rounded-2xl shadow-2xl flex items-center justify-between border-2 border-amber-300">
               <span className="text-xs font-bold truncate max-w-[240px]">
                 {skipToast.message}
               </span>
+
               <button
                 onClick={handleUndoSkip}
                 className="flex items-center gap-1 px-2.5 py-1 bg-black text-amber-300 rounded-lg text-xs font-black uppercase tracking-wider hover:bg-neutral-900 transition-colors"
@@ -562,7 +749,7 @@ export default function App() {
           </div>
         )}
 
-        {/* Case 1: Route finished / all customers visited */}
+        {/* Case 1: Route finished */}
         {isRouteFinished ? (
           <RouteCompletionView
             stops={routeData.stops}
@@ -621,17 +808,23 @@ export default function App() {
         ) : (
           /* Case 3: No route loaded */
           <div className="flex-1 flex flex-col items-center justify-center text-center p-6 space-y-4 my-auto">
-            <img 
-              src="/icon-192.png" 
-              alt="Garbage Route" 
-              className="w-20 h-20 rounded-3xl border-2 border-emerald-400/80 shadow-2xl object-cover" 
+            <img
+              src="/icon-192.png"
+              alt="Garbage Route"
+              className="w-20 h-20 rounded-3xl border-2 border-emerald-400/80 shadow-2xl object-cover"
             />
+
             <div>
-              <h2 className="text-2xl font-black text-white">Garbage Route</h2>
+              <h2 className="text-2xl font-black text-white">
+                Garbage Route
+              </h2>
+
               <p className="text-xs text-neutral-400 mt-1 max-w-xs">
-                Import a customer GPX file from OsmAnd or pick a built-in delivery route to begin.
+                Import a customer GPX file from OsmAnd or pick
+                a built-in delivery route to begin.
               </p>
             </div>
+
             <div className="space-y-2 w-full max-w-xs">
               <button
                 onClick={() => setIsImportOpen(true)}
@@ -640,11 +833,21 @@ export default function App() {
                 <Upload className="w-4 h-4" />
                 <span>Import GPX File</span>
               </button>
+
               <button
                 onClick={() => {
                   const defaultPreset = SAMPLE_GPX_ROUTES[0];
-                  const parsed = parseGPX(defaultPreset.gpxXml, defaultPreset.title);
-                  handleImportSuccess(parsed.stops, parsed.routeName, `${defaultPreset.id}.gpx`);
+
+                  const parsed = parseGPX(
+                    defaultPreset.gpxXml,
+                    defaultPreset.title,
+                  );
+
+                  handleImportSuccess(
+                    parsed.stops,
+                    parsed.routeName,
+                    `${defaultPreset.id}.gpx`,
+                  );
                 }}
                 className="w-full py-3 px-4 rounded-2xl bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-neutral-200 font-bold text-xs flex items-center justify-center gap-2 transition-all"
               >
@@ -656,7 +859,7 @@ export default function App() {
         )}
       </main>
 
-      {/* Import Modal */}
+      {/* Import modal */}
       <GpxImportModal
         isOpen={isImportOpen}
         isDark={isDark}
@@ -664,7 +867,7 @@ export default function App() {
         onImportSuccess={handleImportSuccess}
       />
 
-      {/* Route List Drawer */}
+      {/* Route list drawer */}
       {routeData && (
         <RouteListDrawer
           isOpen={isDrawerOpen}
@@ -678,20 +881,22 @@ export default function App() {
         />
       )}
 
-      {/* Settings Modal */}
+      {/* Settings modal */}
       <SettingsModal
         isOpen={isSettingsOpen}
         isDark={isDark}
         settings={settings}
         onClose={() => setIsSettingsOpen(false)}
-        onUpdateSettings={(newSettings) => setSettings((s) => ({ ...s, ...newSettings }))}
+        onUpdateSettings={(newSettings) =>
+          setSettings((s) => ({ ...s, ...newSettings }))
+        }
         onOpenImport={() => setIsImportOpen(true)}
         onResetProgress={handleResetProgress}
         onClearRoute={handleClearRoute}
         onOpenExport={() => setIsExportOpen(true)}
       />
 
-      {/* Export / APK Modal */}
+      {/* Export / APK modal */}
       <ExportModal
         isOpen={isExportOpen}
         onClose={() => setIsExportOpen(false)}
@@ -699,4 +904,4 @@ export default function App() {
       />
     </div>
   );
-}
+        }
