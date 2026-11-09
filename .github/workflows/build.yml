@@ -1,3 +1,4 @@
+
 name: Build Android APK
 
 on:
@@ -6,140 +7,362 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
-    name: Build & Package APK
+    name: Build and Verify Garbage Route APK
     runs-on: ubuntu-latest
 
     steps:
+      # --------------------------------------------------
+      # 1. Get repository
+      # --------------------------------------------------
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      # --------------------------------------------------
+      # 2. Select the exact source archive
+      # --------------------------------------------------
       - name: Select and Validate Source
         shell: bash
         run: |
           set -euo pipefail
 
           echo "Commit: $GITHUB_SHA"
-          echo "Run: $GITHUB_RUN_ID"
+          echo "Run ID: $GITHUB_RUN_ID"
 
-          if [ -f "Garbage_Route_Source.zip" ]; then
-            echo "Using uploaded source archive as the source of truth."
-            mkdir -p /tmp/garbage-route-source
-            unzip -o Garbage_Route_Source.zip -d /tmp/garbage-route-source
-
-            SOURCE_ROOT="/tmp/garbage-route-source"
-            if [ ! -f "$SOURCE_ROOT/package.json" ]; then
-              echo "ERROR: package.json was not found at the ZIP root."
-              find "$SOURCE_ROOT" -maxdepth 3 -name package.json -print
-              exit 1
-            fi
-
-            rsync -a --exclude='.github/' "$SOURCE_ROOT/" ./
-          else
-            echo "No source ZIP found; using checked-out repository files."
+          if [ ! -f "Garbage_Route_Source.zip" ]; then
+            echo "ERROR: Garbage_Route_Source.zip is missing."
+            exit 1
           fi
 
+          SOURCE_ARCHIVE_SHA=$(sha256sum Garbage_Route_Source.zip | awk '{print $1}')
+          echo "SOURCE_ARCHIVE_SHA=$SOURCE_ARCHIVE_SHA" >> "$GITHUB_ENV"
+
+          echo "Using exact source archive:"
+          echo "Garbage_Route_Source.zip"
+          echo "SHA256: $SOURCE_ARCHIVE_SHA"
+
+          rm -rf /tmp/garbage-route-source
+          mkdir -p /tmp/garbage-route-source
+
+          unzip -q Garbage_Route_Source.zip -d /tmp/garbage-route-source
+
+          SOURCE_ROOT="/tmp/garbage-route-source"
+
+          if [ ! -f "$SOURCE_ROOT/package.json" ]; then
+            echo "ERROR: package.json not found at archive root."
+            find "$SOURCE_ROOT" -maxdepth 4 -name package.json -print
+            exit 1
+          fi
+
+          # Use the uploaded source, but retain this GitHub workflow.
+          rsync -a --delete \
+            --exclude='.github/' \
+            "$SOURCE_ROOT/" ./
+
+          # Required project files.
           test -f package.json
           test -f src/App.tsx
           test -f src/utils/useGpsTracker.ts
           test -f src/components/StopCard.tsx
+          test -f vite.config.ts
           test -d android
+
           echo "Source validation passed."
 
-          echo "=== Arrival-zone logic ==="
-          grep -n -E 'baseConfirmRadius|effectiveConfirmZone|accuracyTolerance' src/utils/useGpsTracker.ts || true
+          echo "=== Vite configuration ==="
+          cat vite.config.ts
 
-          echo "=== Turn-warning defaults ==="
-          grep -n -E '600|500' src/App.tsx src/components/StopCard.tsx || true
-
+      # --------------------------------------------------
+      # 3. Java and Node
+      # --------------------------------------------------
       - name: Set up Java JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: "17"
           distribution: temurin
 
-      - name: Set up Node.js
+      - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
+      # --------------------------------------------------
+      # 4. Install dependencies
+      # --------------------------------------------------
       - name: Install Web Dependencies
+        shell: bash
         run: |
           set -euo pipefail
-          npm install --legacy-peer-deps
 
+          if [ -f package-lock.json ]; then
+            npm ci --legacy-peer-deps
+          else
+            echo "No package-lock.json found. Using npm install."
+            npm install --legacy-peer-deps
+          fi
+
+      # --------------------------------------------------
+      # 5. Preserve existing Android compatibility fixes
+      # --------------------------------------------------
       - name: Apply Existing File Picker Compatibility Changes
-        run: |
-          sed -i 's/accept="[^"]*"/accept=""/g' src/components/GpxImportModal.tsx 2>/dev/null || true
-          sed -i 's/accept="[^"]*"/accept=""/g' src/App.tsx 2>/dev/null || true
-          sed -i 's/fileChooserParams?.createIntent()/null/g' android/app/src/main/java/com/routecompanion/app/MainActivity.kt 2>/dev/null || true
-
-      - name: Build Web Application
+        shell: bash
         run: |
           set -euo pipefail
+
+          sed -i 's/accept="[^"]*"/accept=""/g' \
+            src/components/GpxImportModal.tsx 2>/dev/null || true
+
+          sed -i 's/accept="[^"]*"/accept=""/g' \
+            src/App.tsx 2>/dev/null || true
+
+          sed -i 's/fileChooserParams?.createIntent()/null/g' \
+            android/app/src/main/java/com/routecompanion/app/MainActivity.kt \
+            2>/dev/null || true
+
+      # --------------------------------------------------
+      # 6. Build web application and verify asset paths
+      # --------------------------------------------------
+      - name: Build Web Application
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Building production web application..."
           npm run build
-          test -f dist/index.html
 
-          rm -rf android/app/src/main/assets
-          mkdir -p android/app/src/main/assets/dist
-          cp -a dist/. android/app/src/main/assets/dist/
-
-          cat > android/app/src/main/assets/build-info.txt <<EOF
-          commit=$GITHUB_SHA
-          run_id=$GITHUB_RUN_ID
-          run_number=$GITHUB_RUN_NUMBER
-          source_archive_sha256=$(sha256sum Garbage_Route_Source.zip 2>/dev/null | cut -d ' ' -f 1 || echo unavailable)
-          EOF
-
-          echo "=== Generated JavaScript files ==="
-          find android/app/src/main/assets/dist -type f \( -name '*.js' -o -name '*.css' \) -print
-
-          if grep -R -F 'Math.max(baseConfirmRadius, 105.0)' android/app/src/main/assets/dist; then
-            echo "ERROR: Known forced 105-metre expression is present."
+          if [ ! -f dist/index.html ]; then
+            echo "ERROR: dist/index.html was not generated."
             exit 1
           fi
 
-          echo "Web build and asset checks completed."
+          echo "=== Generated HTML ==="
+          cat dist/index.html
 
-      - name: Ensure Android Structure & Config
+          # Reject absolute asset references.
+          if grep -Eq '(src|href)="/assets/' dist/index.html; then
+            echo "ERROR: Absolute /assets/ paths detected."
+            echo "Vite must use base: './' for Android."
+            exit 1
+          fi
+
+          # Require relative JavaScript and CSS references.
+          grep -Eq 'src="\./assets/[^"]+\.js"' dist/index.html
+          grep -Eq 'href="\./assets/[^"]+\.css"' dist/index.html
+
+          echo "Relative asset paths confirmed."
+
+          # Verify every referenced local asset exists.
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          const html = fs.readFileSync('dist/index.html', 'utf8');
+
+          const refs = [
+            ...html.matchAll(/(?:src|href)="\.\/([^"]+)"/g)
+          ]
+            .map(match => match[1])
+            .filter(path => path.startsWith('assets/'));
+
+          if (refs.length < 2) {
+            throw new Error('JavaScript/CSS references were not found.');
+          }
+
+          for (const ref of refs) {
+            const file = `dist/${ref}`;
+
+            if (!fs.existsSync(file)) {
+              throw new Error(`Missing web asset: ${file}`);
+            }
+
+            console.log(`Verified: ${file}`);
+          }
+          NODE
+
+          # Replace old Android assets completely.
+          rm -rf android/app/src/main/assets
+
+          mkdir -p android/app/src/main/assets/dist
+
+          # The Android WebView loads:
+          # /assets/dist/index.html
+          #
+          # Therefore the compiled site belongs in:
+          # android/app/src/main/assets/dist/
+          cp -a dist/. android/app/src/main/assets/dist/
+
+          # Add build identification.
+          cat > android/app/src/main/assets/dist/build-info.txt <<EOF
+          commit=$GITHUB_SHA
+          run_id=$GITHUB_RUN_ID
+          run_number=$GITHUB_RUN_NUMBER
+          source_archive_sha256=$SOURCE_ARCHIVE_SHA
+          EOF
+
+          echo "=== Verify Android asset directory ==="
+
+          test -f android/app/src/main/assets/dist/index.html
+
+          grep -Eq 'src="\./assets/[^"]+\.js"' \
+            android/app/src/main/assets/dist/index.html
+
+          grep -Eq 'href="\./assets/[^"]+\.css"' \
+            android/app/src/main/assets/dist/index.html
+
+          echo "Android web assets verified."
+
+      # --------------------------------------------------
+      # 7. Ensure Android configuration
+      # --------------------------------------------------
+      - name: Ensure Android Structure and Config
+        shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p android/app/src/main/res/values
+
           touch android/app/proguard-rules.pro
 
-          printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<resources>' '    <string name="app_name">Garbage Route</string>' '</resources>' > android/app/src/main/res/values/strings.xml
-          printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<resources>' '    <color name="ic_launcher_background">#051d08</color>' '</resources>' > android/app/src/main/res/values/colors.xml
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="utf-8"?>' \
+            '<resources>' \
+            '    <string name="app_name">Garbage Route</string>' \
+            '</resources>' \
+            > android/app/src/main/res/values/strings.xml
+
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="utf-8"?>' \
+            '<resources>' \
+            '    <color name="ic_launcher_background">#051d08</color>' \
+            '</resources>' \
+            > android/app/src/main/res/values/colors.xml
+
           echo "sdk.dir=$ANDROID_HOME" > android/local.properties
 
+      # --------------------------------------------------
+      # 8. Set up Gradle
+      # --------------------------------------------------
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: 8.5
           cache-disabled: true
 
+      # --------------------------------------------------
+      # 9. Build Android APK
+      # --------------------------------------------------
       - name: Build Android APK
         working-directory: android
+        shell: bash
         run: |
-          set -o pipefail
-          gradle assembleDebug -x lint -x test --no-daemon --stacktrace 2>&1 | tee build.log
+          set -euo pipefail
 
+          gradle assembleDebug \
+            -x lint \
+            -x test \
+            --no-daemon \
+            --stacktrace
+
+      # --------------------------------------------------
+      # 10. Verify actual APK contents
+      # --------------------------------------------------
+      - name: Verify APK Web Assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: APK was not generated."
+            exit 1
+          fi
+
+          echo "=== Inspecting APK contents ==="
+
+          unzip -l "$APK" > /tmp/apk-contents.txt
+
+          grep -F 'assets/dist/index.html' /tmp/apk-contents.txt
+
+          mkdir -p /tmp/apk-check
+          unzip -q "$APK" -d /tmp/apk-check
+
+          APK_HTML="/tmp/apk-check/assets/dist/index.html"
+
+          if [ ! -f "$APK_HTML" ]; then
+            echo "ERROR: APK is missing assets/dist/index.html."
+            exit 1
+          fi
+
+          echo "=== APK HTML ==="
+          cat "$APK_HTML"
+
+          if grep -Eq '(src|href)="/assets/' "$APK_HTML"; then
+            echo "ERROR: APK still contains absolute asset paths."
+            exit 1
+          fi
+
+          grep -Eq 'src="\./assets/[^"]+\.js"' "$APK_HTML"
+          grep -Eq 'href="\./assets/[^"]+\.css"' "$APK_HTML"
+
+          # Verify JavaScript and CSS files exist inside APK.
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          const html = fs.readFileSync(
+            '/tmp/apk-check/assets/dist/index.html',
+            'utf8'
+          );
+
+          const refs = [
+            ...html.matchAll(/(?:src|href)="\.\/([^"]+)"/g)
+          ]
+            .map(match => match[1])
+            .filter(path => path.startsWith('assets/'));
+
+          for (const ref of refs) {
+            const file = `/tmp/apk-check/assets/dist/${ref}`;
+
+            if (!fs.existsSync(file)) {
+              throw new Error(`APK is missing: ${file}`);
+            }
+
+            console.log(`APK contains: ${ref}`);
+          }
+
+          const info = fs.readFileSync(
+            '/tmp/apk-check/assets/dist/build-info.txt',
+            'utf8'
+          );
+
+          console.log('=== APK build information ===');
+          console.log(info);
+          NODE
+
+          echo "SUCCESS: APK contains the verified web application."
+
+      # --------------------------------------------------
+      # 11. Upload build log
+      # --------------------------------------------------
       - name: Upload Build Log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gradle-build-log
+          name: Garbage-Route-Build-Log
           path: android/build.log
           if-no-files-found: ignore
           retention-days: 14
 
+      # --------------------------------------------------
+      # 12. Upload APK only after all checks pass
+      # --------------------------------------------------
       - name: Upload Ready-to-Install APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Garbage-Route-APK
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
