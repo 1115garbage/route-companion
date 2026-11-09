@@ -15,30 +15,30 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Download repository
+      # 1. Get the GitHub repository
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 2. Select the exact source ZIP
-      - name: Select and Validate Source
+      # 2. Extract ONLY the designated source ZIP
+      - name: Select and Extract Source
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Commit: $GITHUB_SHA"
-          echo "Run ID: $GITHUB_RUN_ID"
-
           ARCHIVE="Garbage_Route_Source.zip"
 
+          echo "Git commit: $GITHUB_SHA"
+          echo "GitHub run: $GITHUB_RUN_ID"
+
           if [ ! -f "$ARCHIVE" ]; then
-            echo "ERROR: $ARCHIVE was not found."
+            echo "ERROR: $ARCHIVE was not found in the repository root."
             exit 1
           fi
 
-          SOURCE_ARCHIVE_SHA=$(sha256sum "$ARCHIVE" | awk '{print $1}')
-          echo "SOURCE_ARCHIVE_SHA=$SOURCE_ARCHIVE_SHA" >> "$GITHUB_ENV"
+          SOURCE_SHA=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+          echo "SOURCE_SHA=$SOURCE_SHA" >> "$GITHUB_ENV"
 
-          echo "Source ZIP SHA256: $SOURCE_ARCHIVE_SHA"
+          echo "Source archive SHA256: $SOURCE_SHA"
 
           rm -rf /tmp/garbage-route-source
           mkdir -p /tmp/garbage-route-source
@@ -47,46 +47,55 @@ jobs:
 
           SOURCE_ROOT="/tmp/garbage-route-source"
 
-          # Find the actual project root inside the ZIP.
           if [ ! -f "$SOURCE_ROOT/package.json" ]; then
-            PACKAGE_FILE=$(find "$SOURCE_ROOT" -mindepth 2 -maxdepth 5 -name package.json -print -quit)
+            PACKAGE_FILE=$(find "$SOURCE_ROOT" \
+              -mindepth 2 -maxdepth 5 \
+              -name package.json -print -quit)
 
             if [ -z "$PACKAGE_FILE" ]; then
-              echo "ERROR: package.json was not found in source ZIP."
+              echo "ERROR: package.json not found inside source ZIP."
+              find "$SOURCE_ROOT" -maxdepth 4 -type f | head -100
               exit 1
             fi
 
             SOURCE_ROOT=$(dirname "$PACKAGE_FILE")
           fi
 
-          echo "Selected source root: $SOURCE_ROOT"
+          echo "Using source directory: $SOURCE_ROOT"
 
           test -f "$SOURCE_ROOT/package.json"
           test -f "$SOURCE_ROOT/vite.config.ts"
           test -d "$SOURCE_ROOT/src"
           test -d "$SOURCE_ROOT/android"
+          test -f "$SOURCE_ROOT/android/app/src/main/java/com/routecompanion/app/MainActivity.kt"
 
-          # Copy source into repository while preserving GitHub workflow.
+          # Copy the selected source without replacing this workflow.
           rsync -a --delete \
             --exclude='.github/' \
             "$SOURCE_ROOT/" ./
 
-          echo "Source extraction and validation successful."
+          echo "Source extraction completed."
 
-      # 3. Configure Java
+          echo "=== Actual Vite configuration ==="
+          cat vite.config.ts
+
+          echo "=== Actual package scripts ==="
+          node -e "console.log(JSON.stringify(require('./package.json').scripts,null,2))"
+
+      # 3. Configure Java 17
       - name: Set up Java JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: "17"
           distribution: temurin
 
-      # 4. Configure Node
-      - name: Set up Node.js 20
+      # 4. Configure Node 22
+      - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
 
-      # 5. Install dependencies
+      # 5. Install Node dependencies
       - name: Install Web Dependencies
         shell: bash
         run: |
@@ -98,38 +107,41 @@ jobs:
             npm install --legacy-peer-deps
           fi
 
-      # 6. Build web application
-      # IMPORTANT: --base=./ forces relative asset paths.
+      # 6. Build Vite DIRECTLY
+      # Do not use npm run build here.
+      # The package.json build script combines Vite and another script.
       - name: Build Web Application
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Building Garbage Route web application..."
+          echo "Running Vite directly."
+          echo "Forcing relative Android asset paths."
 
-          npm run build -- --base=./
+          rm -rf dist
+
+          npx vite build --base=./
 
           if [ ! -f dist/index.html ]; then
             echo "ERROR: Vite did not generate dist/index.html."
             exit 1
           fi
 
-          echo "=== Generated HTML ==="
+          echo "=== Generated index.html ==="
           cat dist/index.html
 
           # Reject absolute asset paths.
           if grep -Eq '(src|href)="/assets/' dist/index.html; then
             echo "ERROR: Absolute /assets/ paths detected."
+            echo "Vite did not generate relative paths."
             exit 1
           fi
 
-          # Require relative JavaScript and CSS paths.
+          # Require relative JavaScript and CSS references.
           grep -Eq 'src="\./assets/[^"]+\.js"' dist/index.html
           grep -Eq 'href="\./assets/[^"]+\.css"' dist/index.html
 
-          echo "Relative JavaScript and CSS paths verified."
-
-          # Check that every referenced asset exists.
+          # Check that every referenced file exists.
           node --input-type=module <<'NODE'
           import fs from 'node:fs';
 
@@ -142,19 +154,23 @@ jobs:
             .filter(path => path.startsWith('assets/'));
 
           if (refs.length < 2) {
-            throw new Error('Expected JavaScript and CSS references were not found.');
+            throw new Error(
+              'Expected JavaScript and CSS references were not found.'
+            );
           }
 
           for (const ref of refs) {
             if (!fs.existsSync(`dist/${ref}`)) {
-              throw new Error(`Missing asset: dist/${ref}`);
+              throw new Error(`Missing generated asset: dist/${ref}`);
             }
 
             console.log(`Verified: dist/${ref}`);
           }
           NODE
 
-      # 7. Copy web application into Android assets
+          echo "SUCCESS: Vite generated valid relative asset paths."
+
+      # 7. Copy the web app to the exact Android location
       - name: Package Web Assets
         shell: bash
         run: |
@@ -165,46 +181,88 @@ jobs:
           rm -rf android/app/src/main/assets
           mkdir -p "$DEST"
 
+          # Copy the contents of dist into assets/dist.
           cp -a dist/. "$DEST/"
 
-          test -f "$DEST/index.html"
+          touch android/app/src/main/assets/.nomedia
+          touch "$DEST/.nomedia"
 
+          # Identify this exact build inside the APK.
           cat > "$DEST/build-info.txt" <<EOF
           commit=$GITHUB_SHA
           run_id=$GITHUB_RUN_ID
           run_number=$GITHUB_RUN_NUMBER
-          source_archive_sha256=$SOURCE_ARCHIVE_SHA
+          source_archive_sha256=$SOURCE_SHA
           EOF
 
-          echo "Android web assets copied successfully."
+          test -f "$DEST/index.html"
 
-          echo "=== Packaged HTML ==="
+          echo "=== Android packaged HTML ==="
           cat "$DEST/index.html"
 
           grep -Eq 'src="\./assets/[^"]+\.js"' "$DEST/index.html"
           grep -Eq 'href="\./assets/[^"]+\.css"' "$DEST/index.html"
 
-      # 8. Configure Gradle
+          echo "SUCCESS: Web application copied to Android assets."
+
+      # 8. Verify Android SDK
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ANDROID_SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+
+          if [ -z "$ANDROID_SDK_DIR" ]; then
+            ANDROID_SDK_DIR="/usr/local/lib/android/sdk"
+          fi
+
+          export ANDROID_HOME="$ANDROID_SDK_DIR"
+          export ANDROID_SDK_ROOT="$ANDROID_SDK_DIR"
+
+          echo "ANDROID_HOME=$ANDROID_SDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_DIR" >> "$GITHUB_ENV"
+
+          if [ ! -d "$ANDROID_SDK_DIR" ]; then
+            echo "ERROR: Android SDK directory not found."
+            exit 1
+          fi
+
+          mkdir -p "$ANDROID_SDK_DIR/licenses"
+
+          printf '%s\n' \
+            "24333f8a63b6825ea9c5514f83c2829b004d1fee" \
+            > "$ANDROID_SDK_DIR/licenses/android-sdk-license"
+
+          printf '%s\n' \
+            "84831b9409646a918e30573bab4c9c91346d8abd" \
+            > "$ANDROID_SDK_DIR/licenses/android-sdk-preview-license"
+
+          chmod +x android/gradlew 2>/dev/null || true
+
+          echo "sdk.dir=$ANDROID_SDK_DIR" > android/local.properties
+
+      # 9. Set up Gradle
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: 8.5
           cache-disabled: true
 
-      # 9. Build Android APK
+      # 10. Build Android APK
       - name: Build Android APK
-        shell: bash
         working-directory: android
+        shell: bash
         run: |
-          set -euo pipefail
+          set -o pipefail
 
           gradle assembleDebug \
             -x lint \
             -x test \
             --no-daemon \
-            --stacktrace
+            --stacktrace 2>&1 | tee build.log
 
-      # 10. Verify actual APK
+      # 11. Verify the ACTUAL APK
       - name: Verify APK Web Assets
         shell: bash
         run: |
@@ -217,28 +275,31 @@ jobs:
             exit 1
           fi
 
+          rm -rf /tmp/garbage-route-apk
           mkdir -p /tmp/garbage-route-apk
 
           unzip -q "$APK" -d /tmp/garbage-route-apk
 
-          APK_HTML="/tmp/garbage-route-apk/assets/dist/index.html"
+          APK_ROOT="/tmp/garbage-route-apk/assets/dist"
+          APK_HTML="$APK_ROOT/index.html"
 
           if [ ! -f "$APK_HTML" ]; then
-            echo "ERROR: APK does not contain assets/dist/index.html."
+            echo "ERROR: APK is missing assets/dist/index.html."
             exit 1
           fi
 
-          echo "=== APK HTML ==="
+          echo "=== Actual APK HTML ==="
           cat "$APK_HTML"
 
           if grep -Eq '(src|href)="/assets/' "$APK_HTML"; then
-            echo "ERROR: APK contains absolute asset paths."
+            echo "ERROR: APK still contains absolute asset paths."
             exit 1
           fi
 
           grep -Eq 'src="\./assets/[^"]+\.js"' "$APK_HTML"
           grep -Eq 'href="\./assets/[^"]+\.css"' "$APK_HTML"
 
+          # Verify every referenced file is inside the APK.
           node --input-type=module <<'NODE'
           import fs from 'node:fs';
 
@@ -251,24 +312,31 @@ jobs:
             .map(match => match[1])
             .filter(path => path.startsWith('assets/'));
 
+          if (refs.length < 2) {
+            throw new Error('APK JavaScript/CSS references missing.');
+          }
+
           for (const ref of refs) {
             if (!fs.existsSync(`${root}/${ref}`)) {
-              throw new Error(`APK is missing ${ref}`);
+              throw new Error(`APK is missing: ${ref}`);
             }
 
-            console.log(`APK verified: ${ref}`);
+            console.log(`APK contains: ${ref}`);
           }
 
-          if (!fs.existsSync(`${root}/build-info.txt`)) {
-            throw new Error('APK build information is missing.');
+          const info = `${root}/build-info.txt`;
+
+          if (!fs.existsSync(info)) {
+            throw new Error('APK build information missing.');
           }
 
-          console.log(fs.readFileSync(`${root}/build-info.txt`, 'utf8'));
+          console.log('=== APK build information ===');
+          console.log(fs.readFileSync(info, 'utf8'));
           NODE
 
           echo "SUCCESS: APK asset verification passed."
 
-      # 11. Upload APK
+      # 12. Upload APK only after verification succeeds
       - name: Upload Ready-to-Install APK
         if: success()
         uses: actions/upload-artifact@v4
@@ -278,7 +346,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # 12. Upload diagnostic files
+      # 13. Upload diagnostics, even if build fails
       - name: Upload Build Diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -288,5 +356,6 @@ jobs:
             dist/index.html
             android/app/src/main/assets/dist/index.html
             android/app/src/main/assets/dist/build-info.txt
+            android/build.log
           if-no-files-found: ignore
           retention-days: 14
